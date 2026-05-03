@@ -704,14 +704,13 @@ class Modules(object):
                 modules[module] = module.PRIORITY
 
         # user-defined modules
-        import imp
         user_modules = binwalk.core.settings.Settings().user.modules
         for file_name in os.listdir(user_modules):
             if not file_name.endswith('.py'):
                 continue
             module_name = file_name[:-3]
             try:
-                user_module = imp.load_source(module_name, os.path.join(user_modules, file_name))
+                user_module = binwalk.core.plugin._load_source(module_name, os.path.join(user_modules, file_name))
             except KeyboardInterrupt as e:
                 raise e
             except Exception as e:

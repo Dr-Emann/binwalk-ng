@@ -84,6 +84,11 @@ function install_yaffshiv
 function install_sasquatch
 {
     git clone --quiet --depth 1 --branch "master" https://github.com/devttys0/sasquatch
+    # build.sh extracts squashfs-tools 4.3 and runs `make` on it. Newer GCC
+    # both promotes -Wmisleading-indentation to an error and defaults to
+    # -fno-common (which breaks the tentative `verbose` definition in
+    # error.h). Swap -Werror for -fcommon in the Makefile before make runs.
+    sed -i 's|^make && |sed -i "s/-Werror/-fcommon/g" Makefile \&\& make \&\& |' sasquatch/build.sh
     (cd sasquatch && $SUDO ./build.sh)
     $SUDO rm -rf sasquatch
 }
@@ -115,8 +120,8 @@ function install_cramfstools
 
 function install_ubireader
 {
-    git clone --quiet --depth 1 --branch "master" https://github.com/jrspruitt/ubi_reader
-    (cd ubi_reader && $SUDO $PYTHON setup.py install)
+    git clone --quiet --depth 1 --branch "main" https://github.com/jrspruitt/ubi_reader
+    (cd ubi_reader && $SUDO $PYTHON -m pip install .)
     $SUDO rm -rf ubi_reader
 }
 
