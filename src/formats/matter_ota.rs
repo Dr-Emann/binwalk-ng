@@ -1,3 +1,54 @@
+//! Matter OTA (Over-The-Air) firmware update image format.
+//!
+//! Defined in §11.21 of the Matter Core Specification (CSA). All multi-byte
+//! fields are little-endian.
+//!
+//! ## File layout
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────┐
+//! │ Magic          4 bytes   0x1BEEF11E                       │
+//! │ Total size     8 bytes   size of the entire file          │
+//! │ Header size    4 bytes   byte length of the TLV section   │
+//! ├──────────────────────────────────────────────────────────┤
+//! │ TLV header     variable  Matter TLV-encoded metadata      │
+//! ├──────────────────────────────────────────────────────────┤
+//! │ Payload        variable  raw firmware image               │
+//! └──────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! The three size fields satisfy: `total_size == 16 + header_size + payload_size`.
+//!
+//! ## TLV header fields
+//!
+//! The TLV section is an anonymous Matter TLV Struct whose elements each carry
+//! a one-byte context tag identifying the field:
+//!
+//! | Tag | Field                        | Type         |
+//! |-----|------------------------------|--------------|
+//! |   0 | VendorID                     | uint16       |
+//! |   1 | ProductID                    | uint16       |
+//! |   2 | SoftwareVersion              | uint32       |
+//! |   3 | SoftwareVersionString        | UTF-8 string |
+//! |   4 | PayloadSize                  | uint64       |
+//! |   5 | MinApplicableSoftwareVersion | uint32       |
+//! |   6 | MaxApplicableSoftwareVersion | uint32       |
+//! |   7 | ReleaseNotesURL              | UTF-8 string |
+//! |   8 | ImageDigestType              | uint8        |
+//! |   9 | ImageDigest                  | octet string |
+//!
+//! ## TLV encoding
+//!
+//! Each element begins with a control octet whose upper 3 bits are the tag
+//! control and lower 5 bits are the element type. For integer and string
+//! types, the lowest 2 bits of the element type encode the width of the value
+//! (or of the preceding length field): `00`=u8, `01`=u16, `10`=u32, `11`=u64.
+//!
+//! ```
+//! use binwalk_ng::formats::matter_ota::matter_ota_magic;
+//! assert_eq!(matter_ota_magic(), vec![b"\x1e\xf1\xee\x1b".to_vec()]);
+//! ```
+
 use crate::common::{get_cstring, is_offset_safe};
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
