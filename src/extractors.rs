@@ -289,7 +289,18 @@ impl Chroot {
         chroot_instance
     }
 
-    /// Joins two paths, ensuring that the final path does not traverse outside of the chroot directory.
+    /// Joins two paths, clamping the result so it cannot traverse outside the chroot
+    /// directory, and returns the joined chroot-absolute path.
+    ///
+    /// **This containment is purely lexical.** `..` is collapsed textually and the result
+    /// is clamped under the chroot root, but on-disk symlinks are *not* resolved — so the
+    /// returned path is only safe to hand back to a [`Chroot`] write method (`create_file`,
+    /// `create_directory`, `create_symlink`, …). Those methods re-resolve the path
+    /// physically (following every symlink component) and are the actual security boundary.
+    /// Do **not** use the returned path directly for filesystem I/O or as an argument to an
+    /// external process: a symlink already on disk could otherwise redirect the write
+    /// outside the chroot. The result is chroot-absolute and may be passed straight back in;
+    /// the write methods are idempotent about an already-chrooted prefix.
     ///
     /// ## Example
     ///
@@ -350,7 +361,14 @@ impl Chroot {
         joined_path
     }
 
-    /// Given a file path, returns a sanitized path that is chrooted inside the specified chroot directory.
+    /// Given a file path, returns a sanitized, chroot-absolute path inside the chroot
+    /// directory.
+    ///
+    /// Like [`Chroot::safe_path_join`], the sanitization is **purely lexical**: `..` is
+    /// collapsed textually and the path is clamped under the chroot root, but on-disk
+    /// symlinks are not resolved. The result is only safe when fed back into a [`Chroot`]
+    /// write method (which re-resolves it physically and enforces the real boundary); it
+    /// must not be used directly for filesystem I/O.
     ///
     /// ## Example
     ///
