@@ -1,0 +1,11 @@
+---
+source: tests/common/mod.rs
+assertion_line: 49
+expression: ordered_extractions
+---
+- size: ~
+  success: false
+  extractor: ""
+  do_not_recurse: false
+  output_directory: "[output_directory]"
+- ~

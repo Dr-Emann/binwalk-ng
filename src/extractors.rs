@@ -1093,7 +1093,14 @@ impl Chroot {
         // tagged with whether it originated from a symlink target (`true`) or the input
         // path (`false`), which governs whether `..` clamps or is allowed to escape.
         let mut out: PathBuf = root.clone();
-        let mut pending: VecDeque<(Seg, bool)> = segments(raw_path.as_ref())
+        // Callers may pass a path that is already chroot-absolute (as `chrooted_path` and
+        // `safe_path_join` return) or one relative to the chroot. Strip the chroot prefix
+        // if present so the remainder is always resolved *within* the root, keeping this
+        // idempotent with the path-joining helpers (which likewise never re-prepend the
+        // chroot to a path that already starts with it).
+        let raw = raw_path.as_ref();
+        let raw = raw.strip_prefix(root).unwrap_or(raw);
+        let mut pending: VecDeque<(Seg, bool)> = segments(raw)
             .into_iter()
             .map(|segment| (segment, false))
             .collect();
@@ -1592,6 +1599,29 @@ mod chroot_security_tests {
             fs::read(root.join("realdir/appended.txt")).unwrap(),
             b"more"
         );
+    }
+
+    /// Callers (e.g. the RomFS extractor) build a path with `chrooted_path` /
+    /// `safe_path_join` — which return a chroot-*absolute* path — and pass it straight back
+    /// into the write helpers. Resolution must be idempotent for such paths: the chroot
+    /// prefix must not be appended a second time (which would write to `<root>/<root>/...`).
+    #[test]
+    fn chroot_absolute_path_is_not_double_prefixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let chroot = Chroot::new(dir.path());
+        let root = &chroot.chroot_directory;
+
+        // An already-chrooted absolute path, as the path-join helpers produce.
+        let abs = chroot.chrooted_path("vol/sub");
+        assert!(abs.starts_with(root));
+
+        assert!(chroot.create_directory(&abs));
+        assert!(chroot.create_file(chroot.chrooted_path("vol/sub/file.txt"), b"ok"));
+
+        // Landed exactly at <root>/vol/sub/..., not doubled under a nested <root>/<root>.
+        assert!(root.join("vol/sub").is_dir());
+        assert_eq!(fs::read(root.join("vol/sub/file.txt")).unwrap(), b"ok");
+        assert!(!root.join(root.strip_prefix("/").unwrap_or(root)).exists());
     }
 
     /// `..` in the *input path* (not from a symlink) is clamped at the chroot root rather
