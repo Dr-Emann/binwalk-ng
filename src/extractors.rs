@@ -1035,12 +1035,19 @@ impl Chroot {
     /// chroot directory, following every symlink component, and returns the real on-disk
     /// path it maps to — but only if that path stays *inside* the chroot.
     ///
-    /// Returns `None` if resolution would escape the chroot (a symlink or `..` that lands
-    /// outside it, an absolute symlink target, or a symlink loop), in which case the
-    /// caller must skip the entry. Resolution is *physical*, like `realpath`: a `..` after
-    /// a symlink pops the symlink's resolved target, not the literal link name, and each
-    /// step is checked for containment. A symlink that resolves back inside the chroot is
-    /// followed and allowed — only paths that actually leave the chroot are refused.
+    /// Resolution is *physical*, like `realpath`: a `..` after a symlink pops the symlink's
+    /// resolved target, not the literal link name. The two kinds of `..` are treated
+    /// differently, however:
+    ///
+    /// * `..` (and absolute roots) coming from the **input path** are *clamped* at the
+    ///   chroot root — creating `../x` simply lands inside the chroot, as a well-behaved
+    ///   `tar`/`cpio` extractor would do. The caller's own path can never make this escape.
+    /// * `..` (or an absolute target) coming from a **symlink already on disk** is allowed
+    ///   to climb, but if it resolves *outside* the chroot the whole path is rejected
+    ///   (`None`). We never follow a real symlink out of the sandbox, even though nothing
+    ///   created through the `Chroot` API could produce such an escaping link.
+    ///
+    /// Also returns `None` on a symlink loop (more than `MAX_SYMLINK_DEPTH` hops).
     ///
     /// When `follow_final` is false the final component is placed literally and is *not*
     /// followed (used when the leaf is the entry being created, e.g. a symlink, or when
@@ -1073,22 +1080,41 @@ impl Chroot {
 
         let root = &self.chroot_directory;
 
-        // `out` is the current, physically resolved location; it always stays inside root.
+        // The default / passthrough chroot (the bare filesystem root, e.g. "/") imposes no
+        // containment boundary: input paths are real absolute host paths — including Windows
+        // drive prefixes such as `C:\` — that must be preserved verbatim, and nothing can
+        // escape the filesystem root anyway. Fall back to the lexical join, which keeps the
+        // historical behavior (and avoids corrupting drive-prefixed paths on Windows).
+        if root.parent().is_none() {
+            return Some(self.chrooted_path(raw_path));
+        }
+
+        // `out` is the current, physically resolved location. Each pending segment is
+        // tagged with whether it originated from a symlink target (`true`) or the input
+        // path (`false`), which governs whether `..` clamps or is allowed to escape.
         let mut out: PathBuf = root.clone();
-        // Components still to process. Symlink expansion push-fronts the link's target.
-        let mut pending: VecDeque<Seg> = segments(raw_path.as_ref()).into();
+        let mut pending: VecDeque<(Seg, bool)> = segments(raw_path.as_ref())
+            .into_iter()
+            .map(|segment| (segment, false))
+            .collect();
         let mut symlinks_followed: usize = 0;
 
-        while let Some(segment) = pending.pop_front() {
+        while let Some((segment, from_symlink)) = pending.pop_front() {
             match segment {
-                // An absolute archive path is interpreted relative to the chroot root.
+                // An absolute input path is interpreted relative to the chroot root. (An
+                // absolute symlink target is rejected before it is ever queued, below.)
                 Seg::Root => {
                     out = root.clone();
                 }
                 Seg::Parent => {
-                    // Physical parent. If this climbs above the chroot root the
-                    // post-step containment check below rejects the whole resolution.
-                    out.pop();
+                    if from_symlink {
+                        // A symlink target climbing upward: allow it for now; the
+                        // containment check below rejects the path if it leaves the chroot.
+                        out.pop();
+                    } else if &out != root {
+                        // Input "..": clamp at the chroot root, never climb out.
+                        out.pop();
+                    }
                 }
                 Seg::Normal(name) => {
                     let candidate = out.join(&name);
@@ -1120,9 +1146,10 @@ impl Chroot {
                             }
 
                             // Resolve the (relative) target from the directory containing
-                            // the link by push-fronting its components ahead of the rest.
+                            // the link by push-fronting its components (tagged as
+                            // symlink-derived) ahead of the rest.
                             for target_segment in segments(&target).into_iter().rev() {
-                                pending.push_front(target_segment);
+                                pending.push_front((target_segment, true));
                             }
                         }
                         Ok(_) => {
@@ -1132,7 +1159,8 @@ impl Chroot {
                 }
             }
 
-            // Defensive: every step must keep us inside the chroot.
+            // A real symlink (or a `..` within its target) must never resolve outside the
+            // chroot. Input `..` is clamped above, so this only ever rejects on-disk links.
             if !out.starts_with(root) {
                 return None;
             }
@@ -1564,6 +1592,25 @@ mod chroot_security_tests {
             fs::read(root.join("realdir/appended.txt")).unwrap(),
             b"more"
         );
+    }
+
+    /// `..` in the *input path* (not from a symlink) is clamped at the chroot root rather
+    /// than refused: creating `../x` just lands inside the chroot, the way a well-behaved
+    /// extractor contains a traversal attempt in the archive member name itself.
+    #[test]
+    fn input_dotdot_is_clamped_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let chroot = Chroot::new(dir.path());
+        let root = &chroot.chroot_directory;
+
+        assert!(chroot.create_file("../../../escaped.txt", b"clamped"));
+        assert_eq!(fs::read(root.join("escaped.txt")).unwrap(), b"clamped");
+
+        assert!(chroot.create_directory("../../sub/dir"));
+        assert!(root.join("sub/dir").is_dir());
+
+        // Nothing landed outside the chroot.
+        assert!(!root.parent().unwrap().join("escaped.txt").exists());
     }
 
     /// A symlink whose target escapes the chroot via `..` must be refused, and nothing
