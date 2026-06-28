@@ -2,7 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable description
@@ -28,7 +28,12 @@ pub fn png_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     };
 
     // Perform an extraction dry-run
-    let dry_run = extract_png_image(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_png_image(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the dry-run was a success, this is almost certainly a valid PNG
     if dry_run.success {
@@ -114,12 +119,13 @@ pub fn png_extractor() -> Extractor {
 /// Internal extractor for carving PNG files to disk
 pub fn extract_png_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const PNG_HEADER_LEN: usize = 8;
     const OUTFILE_NAME: &str = "image.png";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse all the PNG chunks to determine the size of PNG data; first chunk starts immediately after the 8-byte PNG header
@@ -130,15 +136,11 @@ pub fn extract_png_image(
         result.size = Some(png_data_size + PNG_HEADER_LEN);
         result.success = true;
 
-        // If extraction was requested, extract the PNG
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            result.success =
-                chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
-        }
+        // Carve out the PNG (a no-op for a dry-run chroot)
+        result.success = chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
     }
 
-    result
+    Ok(result)
 }
 
 fn get_png_data_size(png_chunk_data: &[u8]) -> Option<usize> {

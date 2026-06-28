@@ -95,14 +95,18 @@
 //!     };
 //! }
 //!
-//! /// This function extracts the contents of a FooBar file
-//! pub fn extract_foobar_file(file_data: Vec<u8>, offset: usize, output_directory: Option<&Path>) -> ExtractionResult {
+//! /// This function extracts the contents of a FooBar file.
+//! ///
+//! /// Extracted files are written through `chroot`. The signature parser validates a
+//! /// candidate by calling this with a dry-run Chroot (`Chroot::dry_run()`), which turns
+//! /// every write into a no-op, so the same code path both validates and extracts.
+//! pub fn extract_foobar_file(file_data: &[u8], signature: &SignatureResult, chroot: &Chroot) -> std::io::Result<ExtractionResult> {
 //!
 //!     // This will be the return value
 //!     let mut result = ExtractionResult::default();
 //!
-//!     // Get the FooBar file data, which starts at the specified offset
-//!     if let Some(foobar_data) = file_data.get(offset..) {
+//!     // Get the FooBar file data, which starts at the signature's offset
+//!     if let Some(foobar_data) = file_data.get(signature.offset..) {
 //!         // Parse and validate the FooBar file header; this function is defined in the structures module
 //!         if let Ok(foobar_header) = parse_foobar_header(foobar_data) {
 //!             // Data CRC is calculated over data_size bytes, starting at the end of the FooBar header
@@ -115,27 +119,19 @@
 //!                     // Report the total size of the FooBar file, including header and data
 //!                     result.size = Some(foobar_header.header_size + foobar_header.data_size);
 //!
-//!                     // If an output directory was specified, extract the contents of the FooBar file to disk
-//!                     if let Some(output_directory) = output_directory {
-//!                         // Chroot file I/O inside the specified output directory
-//!                         let chroot = Chroot::new(output_directory);
-//!
-//!                         // The FooBar file format is very simple: just a header, followed by the data we want to extract.
-//!                         // Carve the FooBar data to disk, and set result.success to true if this succeeds.
-//!                         result.success = chroot.carve_file(foobar_header.original_file_name,
-//!                                                            foobar_data,
-//!                                                            foobar_header.header_size,
-//!                                                            foobar_header.data_size);
-//!                     } else {
-//!                         // Nothing else to do, consider this a success
-//!                         result.success = true;
-//!                     }
+//!                     // The FooBar file format is very simple: just a header, followed by the data we want to extract.
+//!                     // Carve the FooBar data to disk, and set result.success to true if this succeeds.
+//!                     // (When `chroot` is a dry-run chroot, this carve is a no-op that reports success.)
+//!                     result.success = chroot.carve_file(foobar_header.original_file_name,
+//!                                                        foobar_data,
+//!                                                        foobar_header.header_size,
+//!                                                        foobar_header.data_size);
 //!                 }
 //!             }
 //!         }
 //!     }
 //!
-//!     return result;
+//!     Ok(result)
 //! }
 //! ```
 
@@ -143,6 +139,7 @@ use crate::signatures::SignatureResult;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
@@ -158,13 +155,26 @@ use walkdir::WalkDir;
 /// This constants in command line arguments will be replaced with the path to the input file
 pub const SOURCE_FILE_PLACEHOLDER: &str = "%e";
 
-/// Return value of InternalExtractor upon error
+/// Error type used by some internal extraction helpers.
 #[derive(Debug, Clone)]
 pub struct ExtractionError;
 
 /// Built-in internal extractors must provide a function conforming to this definition.
-/// Arguments: file_data, offset, output_directory.
-pub type InternalExtractor = fn(&[u8], usize, Option<&Path>) -> ExtractionResult;
+///
+/// ## Arguments
+///
+/// - `file_data`: the entire file data
+/// - `signature`: the [`SignatureResult`] being extracted; `signature.offset` is where extraction begins
+/// - `chroot`: a [`Chroot`] into which extracted files should be written. A dry-run `Chroot`
+///   (see [`Chroot::dry_run`]) turns all writes into no-ops, allowing the extractor to be used
+///   for signature validation without touching the filesystem.
+///
+/// ## Return value
+///
+/// Returns `Ok(ExtractionResult)` on both successful extraction and validation failure (the
+/// latter reported via `ExtractionResult.success == false`). `Err` is reserved for genuine
+/// I/O errors encountered while writing extracted data.
+pub type InternalExtractor = fn(&[u8], &SignatureResult, &Chroot) -> io::Result<ExtractionResult>;
 
 /// Enum to define either an Internal or External extractor type
 #[derive(Debug, Default, Clone)]
@@ -219,6 +229,9 @@ pub struct ProcInfo {
 pub struct Chroot {
     /// The chroot directory passed to Chroot::new
     pub chroot_directory: PathBuf,
+    /// When true, all file-creating operations become no-ops that report success.
+    /// Used to run extractors as validation-only "dry runs" without touching the filesystem.
+    dry_run: bool,
 }
 
 impl Chroot {
@@ -276,6 +289,23 @@ impl Chroot {
         }
 
         chroot_instance
+    }
+
+    /// Create a dry-run chroot instance. All file-creating operations
+    /// ([`create_file`](Self::create_file), [`carve_file`](Self::carve_file),
+    /// [`append_to_file`](Self::append_to_file), [`create_directory`](Self::create_directory),
+    /// device/fifo/socket/symlink creation, and permission/ownership changes) become no-ops
+    /// that report success without touching the filesystem.
+    ///
+    /// This lets an internal extractor double as a signature validator: running it against a
+    /// dry-run chroot performs all the same parsing and validation, but writes nothing to disk.
+    ///
+    /// Unlike [`Chroot::new`], no directory is created on disk.
+    pub fn dry_run() -> Self {
+        Self {
+            dry_run: true,
+            ..Self::default()
+        }
     }
 
     /// Joins two paths, ensuring that the final path does not traverse outside of the chroot directory.
@@ -385,6 +415,10 @@ impl Chroot {
     /// # } _doctest_main_src_extractors_common_rs_213_0(); }
     /// ```
     pub fn create_file(&self, file_path: impl AsRef<Path>, file_data: &[u8]) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let safe_file_path: PathBuf = self.chrooted_path(file_path);
 
         if self.escapes_via_symlink(&safe_file_path) {
@@ -618,6 +652,10 @@ impl Chroot {
     /// # } _doctest_main_src_extractors_common_rs_426_0(); }
     /// ```
     pub fn append_to_file(&self, file_path: impl AsRef<Path>, data: &[u8]) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let safe_file_path: PathBuf = self.chrooted_path(file_path);
 
         if !self.escapes_via_symlink(&safe_file_path) {
@@ -675,6 +713,10 @@ impl Chroot {
     /// assert_eq!(std::path::Path::new(&chroot_dir).join(dir_name).exists(), true);
     /// ```
     pub fn create_directory(&self, dir_path: impl AsRef<Path>) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let safe_dir_path: PathBuf = self.chrooted_path(dir_path);
 
         if self.escapes_via_symlink(&safe_dir_path) {
@@ -720,6 +762,10 @@ impl Chroot {
     /// ```
     #[allow(dead_code)]
     pub fn make_executable(&self, file_path: impl AsRef<Path>) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         // Make the file globally executable
         const UNIX_EXEC_FLAG: u32 = 1;
 
@@ -766,6 +812,10 @@ impl Chroot {
     ///
     /// On non-Unix platforms this is a no-op that returns `true`.
     pub fn set_mode(&self, file_path: impl AsRef<Path>, mode: u32) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let safe_file_path: PathBuf = self.chrooted_path(file_path);
 
         // Never chmod through a symlink (set_permissions follows symlinks).
@@ -800,6 +850,10 @@ impl Chroot {
     /// an unprivileged `tar`/`cpio` extraction would simply keep the caller's ownership.
     /// On non-Unix platforms this is a no-op that returns `true`.
     pub fn set_ownership(&self, file_path: impl AsRef<Path>, uid: u32, gid: u32) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let safe_file_path: PathBuf = self.chrooted_path(file_path);
 
         // lchown leaves the final symlink alone, but a symlinked *parent* would still be
@@ -884,6 +938,10 @@ impl Chroot {
         symlink_path: impl AsRef<Path>,
         target_path: impl AsRef<Path>,
     ) -> bool {
+        if self.dry_run {
+            return true;
+        }
+
         let symlink = symlink_path.as_ref();
         let target = target_path.as_ref();
 
@@ -1030,6 +1088,7 @@ impl Default for Chroot {
     fn default() -> Self {
         Self {
             chroot_directory: PathBuf::from("/"),
+            dry_run: false,
         }
     }
 }
@@ -1099,8 +1158,19 @@ pub fn execute(
 
                     ExtractorType::Internal(func) => {
                         debug!("Executing internal {} extractor", signature.name);
-                        // Run the internal extractor function
-                        result = func(file_data, signature.offset, Some(&output_directory));
+                        // Run the internal extractor function, writing into a chroot rooted at
+                        // the output directory.
+                        let chroot = Chroot::new(&output_directory);
+                        match func(file_data, signature, &chroot) {
+                            Ok(extraction_result) => {
+                                result = extraction_result;
+                            }
+                            Err(e) => {
+                                error!("Internal {} extractor failed: {e}", signature.name);
+                                // Leave `result` as the default (failed) ExtractionResult so the
+                                // output directory is cleaned up below.
+                            }
+                        }
                         // Set the extractor name to "<signature name>_built_in"
                         result.extractor = format!("{}_built_in", signature.name);
                     }

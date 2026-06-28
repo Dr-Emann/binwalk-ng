@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::io;
 
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
+use crate::signatures::SignatureResult;
 
 /// Defines the internal extractor function for u16 swapped firmware images
 ///
@@ -34,19 +35,19 @@ pub fn swapped_extractor_u16() -> Extractor {
 /// Extract firmware where every two bytes have been swapped
 pub fn extract_swapped_u16(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const SWAP_BYTE_COUNT: usize = 2;
-    extract_swapped::<SWAP_BYTE_COUNT>(file_data, offset, output_directory)
+    extract_swapped::<SWAP_BYTE_COUNT>(file_data, signature.offset, chroot)
 }
 
 /// Extract a block of data where every n bytes have been swapped
 fn extract_swapped<const N: usize>(
     file_data: &[u8],
     offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTPUT_FILE_NAME: &str = "swapped.bin";
 
     let mut result = ExtractionResult::default();
@@ -59,15 +60,12 @@ fn extract_swapped<const N: usize>(
         if result.success {
             result.size = Some(swapped_data.len());
 
-            // Write to file, if requested
-            if let Some(output_directory) = output_directory {
-                let chroot = Chroot::new(output_directory);
-                result.success = chroot.create_file(OUTPUT_FILE_NAME, &swapped_data);
-            }
+            // Write to file (a no-op for a dry-run chroot)
+            result.success = chroot.create_file(OUTPUT_FILE_NAME, &swapped_data);
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Swap every N bytes of the provided data

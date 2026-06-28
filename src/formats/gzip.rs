@@ -1,10 +1,10 @@
 use crate::common;
 use crate::common::get_cstring;
 use crate::extractors::inflate;
-use crate::extractors::{ExtractionResult, Extractor, ExtractorType};
+use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -23,7 +23,11 @@ pub fn gzip_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
     const GZIP_ISIZE_SIZE: usize = 4;
 
     // Do a dry-run decompression
-    let dry_run = gzip_decompress(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run = gzip_decompress(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If dry-run was successful, this is almost certainly a valid gzip file
     if dry_run.success {
@@ -233,9 +237,10 @@ pub fn gzip_extractor() -> Extractor {
 /// Internal extractor for gzip compressed data
 pub fn gzip_decompress(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut exresult = ExtractionResult::default();
 
     // Parse the gzip header
@@ -245,7 +250,7 @@ pub fn gzip_decompress(
 
         if file_data.len() > deflate_data_start {
             let inflate_result =
-                inflate::inflate_decompressor(file_data, deflate_data_start, output_directory);
+                inflate::inflate_decompressor(file_data, deflate_data_start, chroot);
             if inflate_result.success {
                 exresult.success = true;
                 exresult.size = Some(inflate_result.size);
@@ -253,5 +258,5 @@ pub fn gzip_decompress(
         }
     }
 
-    exresult
+    Ok(exresult)
 }

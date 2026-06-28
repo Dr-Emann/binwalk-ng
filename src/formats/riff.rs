@@ -1,7 +1,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -111,31 +111,29 @@ pub fn riff_extractor() -> Extractor {
 /// Internal extractor for carving RIFF files to disk
 pub fn extract_riff_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "image.riff";
     const WAV_OUTFILE_NAME: &str = "video.wav";
     const WAV_TYPE: &str = "WAVE";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     if let Ok(riff_header) = parse_riff_header(&file_data[offset..]) {
         result.size = Some(riff_header.size);
         result.success = true;
 
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
+        // Carve out the RIFF file (a no-op for a dry-run chroot)
+        let file_path: String = if riff_header.chunk_type == WAV_TYPE {
+            WAV_OUTFILE_NAME.to_string()
+        } else {
+            OUTFILE_NAME.to_string()
+        };
 
-            let file_path: String = if riff_header.chunk_type == WAV_TYPE {
-                WAV_OUTFILE_NAME.to_string()
-            } else {
-                OUTFILE_NAME.to_string()
-            };
-
-            result.success = chroot.carve_file(file_path, file_data, offset, result.size.unwrap());
-        }
+        result.success = chroot.carve_file(file_path, file_data, offset, result.size.unwrap());
     }
 
-    result
+    Ok(result)
 }

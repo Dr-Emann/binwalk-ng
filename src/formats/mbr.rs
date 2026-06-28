@@ -1,7 +1,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -30,7 +30,12 @@ pub fn mbr_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
         result.offset = offset - MAGIC_OFFSET;
 
         // Do an extraction dry run
-        let dry_run = extract_mbr_partitions(file_data, result.offset, None);
+        let dry_run_sig = SignatureResult {
+            offset: result.offset,
+            ..Default::default()
+        };
+        let dry_run =
+            extract_mbr_partitions(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
         // If dry run was a success, this is likely a valid MBR
         if dry_run.success
@@ -216,12 +221,13 @@ pub fn mbr_extractor() -> Extractor {
 /// Validate and extract partitions from an MBR
 pub fn extract_mbr_partitions(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Return value
     let mut result = ExtractionResult::default();
 
+    let offset = signature.offset;
     let available_data = file_data.len() - offset;
 
     // Parse the MBR header
@@ -234,34 +240,28 @@ pub fn extract_mbr_partitions(
                 result.success = true;
                 result.size = Some(mbr_header.image_size);
 
-                // Do extraction if requested
-                if let Some(output_directory) = output_directory {
-                    // Chroot extracted files into the output directory
-                    let chroot = Chroot::new(output_directory);
+                // Carve out each partition (a no-op for a dry-run chroot)
+                for (partition_count, partition) in mbr_header.partitions.iter().enumerate() {
+                    // Partition names are not unique, output file will be: "<name>_partition.<partition count>"
+                    let partition_name =
+                        format!("{}_partition.{}", partition.name, partition_count);
 
-                    // Loop through each partition
-                    for (partition_count, partition) in mbr_header.partitions.iter().enumerate() {
-                        // Partition names are not unique, output file will be: "<name>_partition.<partition count>"
-                        let partition_name =
-                            format!("{}_partition.{}", partition.name, partition_count);
+                    // Carve out the partition
+                    result.success = chroot.carve_file(
+                        partition_name,
+                        file_data,
+                        partition.start,
+                        partition.size,
+                    );
 
-                        // Carve out the partition
-                        result.success = chroot.carve_file(
-                            partition_name,
-                            file_data,
-                            partition.start,
-                            partition.size,
-                        );
-
-                        // If partition extraction failed, quit and report a failure
-                        if !result.success {
-                            break;
-                        }
+                    // If partition extraction failed, quit and report a failure
+                    if !result.success {
+                        break;
                     }
                 }
             }
         }
     }
 
-    result
+    Ok(result)
 }

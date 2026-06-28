@@ -2,7 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -27,7 +27,12 @@ pub fn android_sparse_parser(
     };
 
     // Do a dry-run extraction
-    let dry_run = extract_android_sparse(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_android_sparse(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(total_size) = dry_run.size
@@ -230,9 +235,9 @@ pub fn android_sparse_extractor() -> Extractor {
 /// Android sparse internal extractor
 pub fn extract_android_sparse(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "unsparsed.img";
 
     // Refuse to produce an unsparsed image larger than this. Real-world Android
@@ -240,6 +245,7 @@ pub fn extract_android_sparse(
     // crafted header trying to exhaust disk space.
     const MAX_UNSPARSED_SIZE: usize = 16 * 1024 * 1024 * 1024; // 16 GiB
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the sparse file header
@@ -249,7 +255,7 @@ pub fn extract_android_sparse(
             .checked_mul(sparse_header.block_size)
         {
             Some(s) if s <= MAX_UNSPARSED_SIZE => {}
-            _ => return result,
+            _ => return Ok(result),
         };
 
         let available_data: usize = file_data.len();
@@ -287,9 +293,8 @@ pub fn extract_android_sparse(
                         }
                     }
 
-                    // If not a dry run, extract the data from the next chunk
-                    if let Some(output_directory) = output_directory {
-                        let chroot = Chroot::new(output_directory);
+                    // Extract the data from the next chunk (a no-op for a dry-run chroot)
+                    {
                         let chunk_data_start: usize = next_chunk_offset + chunk_header.header_size;
                         let chunk_data_end: usize = chunk_data_start + chunk_header.data_size;
 
@@ -299,7 +304,7 @@ pub fn extract_android_sparse(
                                 &chunk_header,
                                 chunk_data,
                                 OUTFILE_NAME,
-                                &chroot,
+                                chroot,
                             ) {
                                 break;
                             }
@@ -322,7 +327,7 @@ pub fn extract_android_sparse(
         }
     }
 
-    result
+    Ok(result)
 }
 
 // Extract a sparse file chunk to disk

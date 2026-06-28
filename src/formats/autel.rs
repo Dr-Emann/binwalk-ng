@@ -2,7 +2,7 @@ use crate::common::get_cstring;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -113,42 +113,40 @@ pub fn autel_extractor() -> Extractor {
 /// https://gist.github.com/sector7-nl/3fc815cd2497817ad461bfbd393294cb
 pub fn autel_deobfuscate(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTPUT_FILE_NAME: &str = "autel.decoded";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     let data = &file_data[offset..];
     let Ok(autel_header) = parse_autel_header(data) else {
-        return result;
+        return Ok(result);
     };
 
     let data_start = autel_header.header_size;
 
     // Get the encoded data
     let Some(autel_data) = data.get(data_start..) else {
-        return result;
+        return Ok(result);
     };
     let Some(autel_data) = autel_data.get(..autel_header.data_size) else {
-        return result;
+        return Ok(result);
     };
-    // Iterate through each block of the encoded data
+    // Iterate through each block of the encoded data, writing the decoded data
+    // (a no-op for a dry-run chroot)
     for chunk in autel_data.chunks(BLOCK_SIZE) {
         let decoded_block = decode_autel_block(chunk);
 
-        // Write to file, if requested
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            if !chroot.append_to_file(OUTPUT_FILE_NAME, &decoded_block) {
-                return result;
-            }
+        if !chroot.append_to_file(OUTPUT_FILE_NAME, &decoded_block) {
+            return Ok(result);
         }
     }
     result.size = Some(autel_header.data_size);
     result.success = true;
-    result
+    Ok(result)
 }
 
 /// Block decoder for autel encoded firmware.

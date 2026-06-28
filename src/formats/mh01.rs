@@ -3,7 +3,7 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::formats::openssl::openssl_crypt_parser;
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -150,15 +150,16 @@ pub fn mh01_extractor() -> Extractor {
 /// Internal extractor for carve pieces of MH01 images to disk
 pub fn extract_mh01_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // File names for the three portions of the MH01 firmware image
     const IV_FILE_NAME: &str = "iv.bin";
     const SIGNATURE_FILE_NAME: &str = "signature.bin";
     const ENCRYPTED_DATA_FILE_NAME: &str = "encrypted.bin";
     const DECRYPTED_DATA_FILE_NAME: &str = "decrypted.bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Get the MH01 image data
@@ -167,43 +168,35 @@ pub fn extract_mh01_image(
         if let Ok(mh01_header) = parse_mh01_header(mh01_data) {
             result.size = Some(mh01_header.total_size);
 
-            // If extraction was requested, do it
-            if let Some(output_directory) = output_directory {
-                let chroot = Chroot::new(output_directory);
-
-                // Try to decrypt the firmware
-                match delink::mh01::decrypt(mh01_data) {
-                    Ok(decrypted_data) => {
-                        // Write decrypted data to disk
-                        result.success =
-                            chroot.create_file(DECRYPTED_DATA_FILE_NAME, &decrypted_data);
-                    }
-                    Err(_) => {
-                        // Decryption failture; extract each part of the firmware image, ensuring that each one extracts without error
-                        result.success = chroot.carve_file(
-                            IV_FILE_NAME,
-                            mh01_data,
-                            mh01_header.iv_offset,
-                            mh01_header.iv_size,
-                        ) && chroot.carve_file(
-                            SIGNATURE_FILE_NAME,
-                            mh01_data,
-                            mh01_header.signature_offset,
-                            mh01_header.signature_size,
-                        ) && chroot.carve_file(
-                            ENCRYPTED_DATA_FILE_NAME,
-                            mh01_data,
-                            mh01_header.encrypted_data_offset,
-                            mh01_header.encrypted_data_size,
-                        );
-                    }
+            // Extract the firmware (writes are no-ops for a dry-run chroot).
+            // Try to decrypt the firmware
+            match delink::mh01::decrypt(mh01_data) {
+                Ok(decrypted_data) => {
+                    // Write decrypted data to disk
+                    result.success = chroot.create_file(DECRYPTED_DATA_FILE_NAME, &decrypted_data);
                 }
-            // No extraction requested, just return success
-            } else {
-                result.success = true;
+                Err(_) => {
+                    // Decryption failture; extract each part of the firmware image, ensuring that each one extracts without error
+                    result.success = chroot.carve_file(
+                        IV_FILE_NAME,
+                        mh01_data,
+                        mh01_header.iv_offset,
+                        mh01_header.iv_size,
+                    ) && chroot.carve_file(
+                        SIGNATURE_FILE_NAME,
+                        mh01_data,
+                        mh01_header.signature_offset,
+                        mh01_header.signature_size,
+                    ) && chroot.carve_file(
+                        ENCRYPTED_DATA_FILE_NAME,
+                        mh01_data,
+                        mh01_header.encrypted_data_offset,
+                        mh01_header.encrypted_data_size,
+                    );
+                }
             }
         }
     }
 
-    result
+    Ok(result)
 }

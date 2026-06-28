@@ -2,7 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -25,7 +25,12 @@ pub fn gif_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     };
 
     // Do an extraction dry-run to validate the GIF image
-    let dry_run = extract_gif_image(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_gif_image(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(total_size) = dry_run.size
@@ -239,11 +244,12 @@ pub fn gif_extractor() -> Extractor {
 /// Parses and carves a GIF image from a file
 pub fn extract_gif_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "image.gif";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the GIF header
@@ -256,17 +262,14 @@ pub fn extract_gif_image(
                 result.size = Some(gif_header.size + gif_data_size);
                 result.success = true;
 
-                // Do extraction, if requested
-                if let Some(output_directory) = output_directory {
-                    let chroot = Chroot::new(output_directory);
-                    result.success =
-                        chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
-                }
+                // Carve out the GIF (a no-op for a dry-run chroot)
+                result.success =
+                    chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Returns the size of the GIF data that follows the GIF header

@@ -7,7 +7,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 mod tags {
@@ -262,11 +262,12 @@ pub fn matter_ota_extractor() -> Extractor {
 /// Matter OTA firmware payload extractor
 pub fn extract_matter_ota(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "matter_payload.bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     if let Ok(ota_header) = parse_matter_ota_header(&file_data[offset..]) {
@@ -278,14 +279,12 @@ pub fn extract_matter_ota(
         let payload_start = offset + total_header_size;
         let payload_end = offset + total_header_size + ota_header.payload_size;
 
-        // Sanity check reported payload size and get the payload data
-        if let Some(payload_data) = file_data.get(payload_start..payload_end)
-            && let Some(output_directory) = output_directory
-        {
-            let chroot = Chroot::new(output_directory);
+        // Sanity check reported payload size and get the payload data, then carve it out
+        // (a no-op for a dry-run chroot)
+        if let Some(payload_data) = file_data.get(payload_start..payload_end) {
             result.success = chroot.carve_file(OUTFILE_NAME, payload_data, 0, payload_data.len());
         }
     }
 
-    result
+    Ok(result)
 }

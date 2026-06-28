@@ -4,7 +4,7 @@ use crate::signatures::{
     CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, SignatureError, SignatureResult,
 };
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable description
@@ -32,7 +32,11 @@ pub fn uimage_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult,
     };
 
     // Do an extraction dry-run
-    let dry_run = extract_uimage(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run = extract_uimage(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(uimage_size) = dry_run.size
@@ -302,13 +306,14 @@ pub fn uimage_extractor() -> Extractor {
 
 pub fn extract_uimage(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // If no name is provided in the uImage header, use this as the output file name
     const DEFAULT_OUTPUT_FILE_NAME: &str = "uimage_data";
     const OUTPUT_FILE_EXT: &str = "bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Get the uImage data and parse the header
@@ -331,9 +336,9 @@ pub fn extract_uimage(
                 result.size = Some(result.size.unwrap() + uimage_header.data_size);
             }
 
-            // If extraction was requested and the data CRC is valid, carve the uImage data out to a file
-            if data_crc_valid && let Some(output_directory) = output_directory {
-                let chroot = Chroot::new(output_directory);
+            // If the data CRC is valid, carve the uImage data out to a file
+            // (a no-op for a dry-run chroot)
+            if data_crc_valid {
                 let file_base_name = if uimage_header.name.is_empty() {
                     DEFAULT_OUTPUT_FILE_NAME.to_string()
                 } else {
@@ -347,5 +352,5 @@ pub fn extract_uimage(
         }
     }
 
-    result
+    Ok(result)
 }

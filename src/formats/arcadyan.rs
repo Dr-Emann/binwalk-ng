@@ -1,7 +1,7 @@
-use crate::extractors::{ExtractionResult, Extractor, ExtractorType};
+use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::formats::lzma::lzma_decompress;
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "Arcadyan obfuscated LZMA";
@@ -32,7 +32,12 @@ pub fn obfuscated_lzma_parser(
         let start_offset: usize = offset - MAGIC_OFFSET;
 
         // Do an extraction dry-run
-        let dry_run = extract_obfuscated_lzma(file_data, start_offset, None);
+        let dry_run_sig = SignatureResult {
+            offset: start_offset,
+            ..Default::default()
+        };
+        let dry_run = extract_obfuscated_lzma(file_data, &dry_run_sig, &Chroot::dry_run())
+            .unwrap_or_default();
 
         // If dry-run was successful, return success
         if dry_run.success {
@@ -77,13 +82,14 @@ pub fn obfuscated_lzma_extractor() -> Extractor {
 /// Internal extractor for Arcadyn Obfuscated LZMA
 pub fn extract_obfuscated_lzma(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const LZMA_DATA_OFFSET: usize = 4;
     const MIN_DATA_SIZE: usize = 0x100;
     const MAX_DATA_SIZE: usize = 0x1B0000;
 
+    let offset = signature.offset;
     let available_data: usize = file_data.len() - offset;
 
     // Sanity check data size
@@ -92,10 +98,14 @@ pub fn extract_obfuscated_lzma(
         let deobfuscated_data = arcadyan_deobfuscator(&file_data[offset..]);
 
         // Do a decompression on the LZMA data (actual LZMA data starts 4 bytes into the deobfuscated data)
-        return lzma_decompress(&deobfuscated_data, LZMA_DATA_OFFSET, output_directory);
+        let lzma_sig = SignatureResult {
+            offset: LZMA_DATA_OFFSET,
+            ..Default::default()
+        };
+        return lzma_decompress(&deobfuscated_data, &lzma_sig, chroot);
     }
 
-    ExtractionResult::default()
+    Ok(ExtractionResult::default())
 }
 
 fn arcadyan_deobfuscator(obfuscated_data: &[u8]) -> Vec<u8> {

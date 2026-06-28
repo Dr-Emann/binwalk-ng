@@ -2,7 +2,7 @@ use crate::common::crc32;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -24,7 +24,12 @@ pub fn trx_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     };
 
     // Do a dry run to validate the TRX data
-    let dry_run = extract_trx_partitions(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_trx_partitions(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(trx_total_size) = dry_run.size
@@ -163,11 +168,12 @@ pub fn trx_extractor() -> Extractor {
 /// Internal extractor for TRX partitions
 pub fn extract_trx_partitions(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const CRC_DATA_START_OFFSET: usize = 12;
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Get the TRX data and parse the header
@@ -183,38 +189,33 @@ pub fn extract_trx_partitions(
             result.success = true;
             result.size = Some(trx_header.total_size);
 
-            // If extraction was requested, carve the TRX partitions
-            if let Some(output_directory) = output_directory {
-                let chroot = Chroot::new(output_directory);
+            // Carve out the TRX partitions (a no-op for a dry-run chroot)
+            for i in 0..trx_header.partitions.len() {
+                let next_partition: usize = i + 1;
+                let this_partition_relative_offset: usize = trx_header.partitions[i];
+                let this_partition_absolute_offset: usize = offset + this_partition_relative_offset;
+                let this_partition_size = if next_partition < trx_header.partitions.len() {
+                    trx_header.partitions[next_partition] - this_partition_relative_offset
+                } else {
+                    trx_header.total_size - this_partition_relative_offset
+                };
 
-                for i in 0..trx_header.partitions.len() {
-                    let next_partition: usize = i + 1;
-                    let this_partition_relative_offset: usize = trx_header.partitions[i];
-                    let this_partition_absolute_offset: usize =
-                        offset + this_partition_relative_offset;
-                    let this_partition_size = if next_partition < trx_header.partitions.len() {
-                        trx_header.partitions[next_partition] - this_partition_relative_offset
-                    } else {
-                        trx_header.total_size - this_partition_relative_offset
-                    };
+                let this_partition_file_name = format!("partition_{i}.bin");
+                result.success = chroot.carve_file(
+                    &this_partition_file_name,
+                    file_data,
+                    this_partition_absolute_offset,
+                    this_partition_size,
+                );
 
-                    let this_partition_file_name = format!("partition_{i}.bin");
-                    result.success = chroot.carve_file(
-                        &this_partition_file_name,
-                        file_data,
-                        this_partition_absolute_offset,
-                        this_partition_size,
-                    );
-
-                    if !result.success {
-                        break;
-                    }
+                if !result.success {
+                    break;
                 }
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 fn trx_crc32(crc_data: &[u8]) -> u32 {

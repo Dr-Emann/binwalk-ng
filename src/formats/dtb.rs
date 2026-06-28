@@ -3,7 +3,7 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use log::error;
-use std::path::Path;
+use std::io;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable description
@@ -254,9 +254,10 @@ pub fn dtb_extractor() -> Extractor {
 /// Internal extractor for extracting Device Tree Blobs
 pub fn extract_dtb(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut hierarchy: Vec<String> = Vec::new();
 
     let mut result = ExtractionResult::default();
@@ -289,20 +290,17 @@ pub fn extract_dtb(
                         result.success = true;
                         result.size = Some(available_data);
                         break;
-                    // DTB property, extract it to disk
+                    // DTB property, extract it to disk (a no-op for a dry-run chroot)
                     } else if node.property {
-                        if let Some(output_directory) = output_directory {
-                            let chroot = Chroot::new(output_directory);
-                            let dir_path = hierarchy.join(std::path::MAIN_SEPARATOR_STR);
-                            let file_path = chroot.safe_path_join(&dir_path, &node.name);
+                        let dir_path = hierarchy.join(std::path::MAIN_SEPARATOR_STR);
+                        let file_path = chroot.safe_path_join(&dir_path, &node.name);
 
-                            if !chroot.create_directory(dir_path) {
-                                break;
-                            }
+                        if !chroot.create_directory(dir_path) {
+                            break;
+                        }
 
-                            if !chroot.create_file(file_path, &node.data) {
-                                break;
-                            }
+                        if !chroot.create_file(file_path, &node.data) {
+                            break;
                         }
                     // The only other supported node type is NOP
                     } else if !node.nop {
@@ -318,5 +316,5 @@ pub fn extract_dtb(
         }
     }
 
-    result
+    Ok(result)
 }

@@ -1,7 +1,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -26,7 +26,12 @@ pub fn bmp_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     };
 
     // Extraction dry-run to validate the image
-    let dry_run = extract_bmp_image(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_bmp_image(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If it was successful, inform the user
     if dry_run.success {
@@ -143,11 +148,12 @@ pub fn bmp_extractor() -> Extractor {
 
 pub fn extract_bmp_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "image.bmp";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the bmp_file_header
@@ -166,14 +172,12 @@ pub fn extract_bmp_image(
                 result.size = Some(bmp_file_header.size);
                 result.success = true;
 
-                if let Some(output_directory) = output_directory {
-                    let chroot = Chroot::new(output_directory);
-                    result.success =
-                        chroot.carve_file(OUTFILE_NAME, file_data, offset, bmp_file_header.size);
-                }
+                // Carve out the BMP (a no-op for a dry-run chroot)
+                result.success =
+                    chroot.carve_file(OUTFILE_NAME, file_data, offset, bmp_file_header.size);
             }
         }
     }
 
-    result
+    Ok(result)
 }

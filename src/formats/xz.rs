@@ -1,4 +1,5 @@
 use crate::common::{crc32, is_offset_safe};
+use crate::extractors::Chroot;
 use crate::formats::lzma::lzma_decompress;
 use crate::formats::sevenzip::sevenzip_extractor;
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
@@ -38,7 +39,12 @@ pub fn xz_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Sig
                 stream_header_count += 1;
 
                 // Do an extraction dry-run to make sure the data decompresses correctly
-                let dry_run = lzma_decompress(file_data, next_offset, None);
+                let dry_run_sig = SignatureResult {
+                    offset: next_offset,
+                    ..Default::default()
+                };
+                let dry_run = lzma_decompress(file_data, &dry_run_sig, &Chroot::dry_run())
+                    .unwrap_or_default();
 
                 // If dry run was a success, update the offset and size fields
                 if dry_run.success

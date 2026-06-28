@@ -2,7 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -24,7 +24,11 @@ pub fn wince_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, 
     };
 
     // Do an extraction dry-run
-    let dry_run = wince_dump(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run = wince_dump(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(total_size) = dry_run.size
@@ -132,9 +136,10 @@ pub fn wince_extractor() -> Extractor {
 /// Internal extractor for extracting data blocks from Windows CE images
 pub fn wince_dump(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the file header
@@ -151,23 +156,19 @@ pub fn wince_dump(
                     result.success = true;
                     result.size = Some(wince_header.header_size + data_blocks.total_size);
 
-                    // If extraction was requested, extract each block to a file on disk
-                    if let Some(output_directory) = output_directory {
-                        let chroot = Chroot::new(output_directory);
+                    // Extract each block to a file on disk (a no-op for a dry-run chroot)
+                    for block in data_blocks.entries {
+                        let block_file_name = format!("{:X}.bin", block.address);
 
-                        for block in data_blocks.entries {
-                            let block_file_name = format!("{:X}.bin", block.address);
-
-                            // If file carving fails, report a failure to extract
-                            if !chroot.carve_file(
-                                block_file_name,
-                                wince_block_data,
-                                block.offset,
-                                block.size,
-                            ) {
-                                result.success = false;
-                                break;
-                            }
+                        // If file carving fails, report a failure to extract
+                        if !chroot.carve_file(
+                            block_file_name,
+                            wince_block_data,
+                            block.offset,
+                            block.size,
+                        ) {
+                            result.success = false;
+                            break;
                         }
                     }
                 }
@@ -175,7 +176,7 @@ pub fn wince_dump(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Stores info about each WinCE block

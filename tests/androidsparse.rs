@@ -7,10 +7,20 @@
 //!   3. Integer underflow when chunk total_size < chunk header size (12)
 
 use binwalk_ng::Binwalk;
+use binwalk_ng::extractors::Chroot;
 use binwalk_ng::formats::androidsparse::extract_android_sparse;
 use binwalk_ng::formats::androidsparse::parse_android_sparse_chunk_header;
+use binwalk_ng::signatures::SignatureResult;
 use std::path::Path;
 use walkdir::WalkDir;
+
+/// Build a SignatureResult positioned at the given offset for invoking an extractor directly.
+fn sig_at(offset: usize) -> SignatureResult {
+    SignatureResult {
+        offset,
+        ..Default::default()
+    }
+}
 
 const SPARSE_MAGIC: u32 = 0xED26FF3A;
 const FILE_HEADER_SIZE: u16 = 28;
@@ -72,7 +82,7 @@ fn underflow_chunk_does_not_panic_during_scan() {
     img.extend(chunk_header(CHUNK_TYPE_DONT_CARE, 1, 0));
 
     // Dry-run via the extractor directly (matches what the signature parser does).
-    let result = extract_android_sparse(&img, 0, None);
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::dry_run()).unwrap();
     assert!(!result.success, "malformed chunk should not extract");
 
     // And via the full scan pipeline, for good measure.
@@ -103,7 +113,7 @@ fn fill_chunk_with_no_payload_does_not_hang_extraction() {
     img.extend(chunk_header(CHUNK_TYPE_FILL, 1, 12)); // total_size==12 -> no payload
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
 
     assert!(
         !result.success,
@@ -135,7 +145,7 @@ fn header_with_overflowing_total_size_is_rejected() {
     img.extend(chunk_header(CHUNK_TYPE_DONT_CARE, 1, 12));
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
     assert!(
         !result.success,
         "sparse header with overflowing block_count*block_size must be rejected"
@@ -159,7 +169,7 @@ fn header_with_oversized_but_nonoverflowing_total_is_rejected() {
     img.extend(chunk_header(CHUNK_TYPE_DONT_CARE, 1, 12));
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
     assert!(!result.success, "256TB-class sparse image must be rejected");
 
     assert!(is_dir_empty_or_zero_size(outdir.path()));
@@ -175,7 +185,7 @@ fn chunk_claiming_more_blocks_than_header_is_rejected() {
     img.extend(chunk_header(CHUNK_TYPE_DONT_CARE, 1_000_000_000, 12));
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
     assert!(
         !result.success,
         "chunk block_count > header block_count must be rejected"
@@ -195,7 +205,7 @@ fn raw_chunk_with_mismatched_payload_size_is_rejected() {
     img.extend_from_slice(&[0u8; 4]);
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
     assert!(
         !result.success,
         "RAW chunk with payload != block_count*block_size must be rejected"
@@ -216,7 +226,7 @@ fn valid_minimal_sparse_image_extracts_successfully() {
     img.extend(chunk_header(CHUNK_TYPE_DONT_CARE, 1, 12));
 
     let outdir = tempfile::tempdir().unwrap();
-    let result = extract_android_sparse(&img, 0, Some(outdir.path()));
+    let result = extract_android_sparse(&img, &sig_at(0), &Chroot::new(outdir.path())).unwrap();
     assert!(
         result.success,
         "minimal valid sparse image failed to extract"

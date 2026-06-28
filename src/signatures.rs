@@ -86,10 +86,10 @@
 //!    };
 //!
 //!    /*
-//!     * The internal FooBar file extractor already parses the header and validates the data CRC. By passing it an output
-//!     * directory of None, it will still parse and validate the data, but without performing an extraction.
+//!     * The internal FooBar file extractor already parses the header and validates the data CRC. By passing it a
+//!     * dry-run Chroot, it will still parse and validate the data, but without performing an extraction.
 //!     */
-//!    let dry_run = extact_foobar_file(file_data, offset, None);
+//!    let dry_run = extract_foobar_file(file_data, &result, &Chroot::dry_run()).unwrap_or_default();
 //!
 //!    // The extractor should have reported success, as well as the total size of the file data
 //!    if dry_run.success == true {

@@ -2,7 +2,7 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use aho_corasick::AhoCorasick;
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "SVG image";
@@ -23,7 +23,12 @@ pub fn svg_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     };
 
     // Perform an extraction dry-run
-    let dry_run = extract_svg_image(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_svg_image(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the dry-run was a success, this is probably a valid JPEG file
     if dry_run.success {
@@ -170,11 +175,12 @@ pub fn svg_extractor() -> Extractor {
 /// Internal extractor for carving SVG images to disk
 pub fn extract_svg_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "image.svg";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the SVG image to determine its total size
@@ -182,12 +188,9 @@ pub fn extract_svg_image(
         result.size = Some(svg_image.total_size);
         result.success = true;
 
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            result.success =
-                chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
-        }
+        // Carve out the SVG (a no-op for a dry-run chroot)
+        result.success = chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
     }
 
-    result
+    Ok(result)
 }

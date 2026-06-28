@@ -3,8 +3,8 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use std::fmt;
+use std::io;
 use std::mem::offset_of;
-use std::path::Path;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Offset of the magic within the header: the NUL terminator of the 48-byte
@@ -307,23 +307,20 @@ pub fn program_store_extractor() -> Extractor {
 
 pub fn extract_program_store(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     let Ok(header) = parse_program_store_header(&file_data[offset..]) else {
-        return result;
+        return Ok(result);
     };
 
     result.size = Some(header.total_len);
     result.success = true;
 
-    let Some(output_directory) = output_directory else {
-        return result;
-    };
-
-    let chroot = Chroot::new(output_directory);
+    // Carve out the payload(s) (a no-op for a dry-run chroot)
     let payload_start = offset + HEADER_SIZE;
     let ProgramStoreHeader {
         filename,
@@ -347,7 +344,7 @@ pub fn extract_program_store(
             let image2_start = offset + total_len - second_len;
             if !chroot.carve_file(&name1, file_data, payload_start, first_len) {
                 result.success = false;
-                return result;
+                return Ok(result);
             }
             if second_len > 0 && !chroot.carve_file(&name2, file_data, image2_start, second_len) {
                 result.success = false;
@@ -355,7 +352,7 @@ pub fn extract_program_store(
         }
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]

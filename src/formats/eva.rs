@@ -4,7 +4,7 @@ use crate::signatures::{
     CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, SignatureError, SignatureResult,
 };
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -615,33 +615,34 @@ pub fn eva_extractor() -> Extractor {
 /// Internal EVA kernel image extractor
 pub fn extract_eva(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     let Some(data) = file_data.get(offset..) else {
-        return result;
+        return Ok(result);
     };
     let Ok(image) = parse_eva_image(file_data, offset) else {
-        return result;
+        return Ok(result);
     };
 
     if !image.all_checksums_valid() {
-        return result;
+        return Ok(result);
     }
 
     // Reconstruct every TI record as a standard LZMA-alone stream paired with its on-disk name
     let outputs: Vec<(&str, Vec<u8>)> = match &image.kind {
         EvaImageKind::SingleKernel(record) => {
             let Some(bytes) = reconstruct_lzma_alone(data, record) else {
-                return result;
+                return Ok(result);
             };
             vec![(PRIMARY_OUTPUT_FILE_NAME, bytes)]
         }
         EvaImageKind::SecondaryFragment(record) => {
             let Some(bytes) = reconstruct_lzma_alone(data, record) else {
-                return result;
+                return Ok(result);
             };
             vec![(SECONDARY_OUTPUT_FILE_NAME, bytes)]
         }
@@ -649,10 +650,10 @@ pub fn extract_eva(
             primary, secondary, ..
         } => {
             let Some(primary_bytes) = reconstruct_lzma_alone(data, primary) else {
-                return result;
+                return Ok(result);
             };
             let Some(secondary_bytes) = reconstruct_lzma_alone(data, secondary) else {
-                return result;
+                return Ok(result);
             };
             vec![
                 (PRIMARY_OUTPUT_FILE_NAME, primary_bytes),
@@ -661,18 +662,16 @@ pub fn extract_eva(
         }
     };
 
-    if let Some(output_directory) = output_directory {
-        let chroot = Chroot::new(output_directory);
-        for (name, bytes) in &outputs {
-            if !chroot.create_file(name, bytes) {
-                return result;
-            }
+    // Write each reconstructed stream to disk (a no-op for a dry-run chroot)
+    for (name, bytes) in &outputs {
+        if !chroot.create_file(name, bytes) {
+            return Ok(result);
         }
     }
 
     result.success = true;
     result.size = Some(image.total_size);
-    result
+    Ok(result)
 }
 
 /// Reconstruct a standard LZMA alone stream from an EVA TI record

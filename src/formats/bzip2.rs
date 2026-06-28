@@ -1,8 +1,8 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use bzip2::read::BzDecoder;
-use std::io::{Read, copy};
-use std::path::Path;
+use std::io;
+use std::io::Read;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "bzip2 compressed data";
@@ -32,7 +32,12 @@ pub fn bzip2_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, 
         ..Default::default()
     };
 
-    let dry_run = bzip2_decompressor(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        bzip2_decompressor(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(bzip2_size) = dry_run.size
@@ -77,12 +82,13 @@ pub fn bzip2_extractor() -> Extractor {
 /// Internal extractor for decompressing BZIP2 data
 pub fn bzip2_decompressor(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Output file for decompressed data
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Slice the data starting from the provided offset
@@ -90,31 +96,17 @@ pub fn bzip2_decompressor(
 
     let mut decoder = BzDecoder::new(bzip2_data);
 
-    if let Some(output_directory) = output_directory {
-        // If extraction is requested, we write directly to the chroot file
-        let chroot = Chroot::new(output_directory);
-
-        // We need a writer target. Assuming append_to_file doesn't expose a raw writer,
-        // we can decompress into a local vector or file, then append it.
-        let mut decompressed_output = Vec::new();
-
-        if decoder.read_to_end(&mut decompressed_output).is_ok()
-            && chroot.create_file(OUTPUT_FILE_NAME, &decompressed_output)
-        {
-            result.success = true;
-            // total_in() tells us exactly how many compressed bytes were read from file_data
-            result.size = Some(decoder.total_in() as usize);
-        }
-    } else {
-        // If no output directory is provided, we just drain the decoder into a sink (null device)
-        // to validate the stream and calculate its total compressed size.
-        let mut sink = std::io::sink();
-
-        if copy(&mut decoder, &mut sink).is_ok() {
-            result.success = true;
-            result.size = Some(decoder.total_in() as usize);
-        }
+    // Decompress the entire stream; reading it in full both validates the stream and lets
+    // total_in() report exactly how many compressed bytes were consumed. The decompressed
+    // data is written via the chroot, which is a no-op for a dry-run chroot.
+    let mut decompressed_output = Vec::new();
+    if decoder.read_to_end(&mut decompressed_output).is_ok()
+        && chroot.create_file(OUTPUT_FILE_NAME, &decompressed_output)
+    {
+        result.success = true;
+        // total_in() tells us exactly how many compressed bytes were read from file_data
+        result.size = Some(decoder.total_in() as usize);
     }
 
-    result
+    Ok(result)
 }

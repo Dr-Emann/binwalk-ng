@@ -4,7 +4,7 @@ use crate::structures::{Endianness, StructureError, dyn_endian};
 use miniz_oxide::inflate;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable description
@@ -30,7 +30,12 @@ pub fn csman_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, 
         ..Default::default()
     };
 
-    let dry_run = extract_csman_dat(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_csman_dat(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(total_size) = dry_run.size
@@ -168,27 +173,29 @@ pub fn csman_extractor() -> Extractor {
 /// Validate and extract CSMan DAT file entries
 pub fn extract_csman_dat(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const COMPRESSED_HEADER_SIZE: usize = 2;
+
+    let offset = signature.offset;
 
     // Return value
     let mut result = ExtractionResult::default();
 
     let Ok((csman_header, payload)) = parse_csman_header(&file_data[offset..]) else {
-        return result;
+        return Ok(result);
     };
 
     let decompressed_data: Vec<u8>;
     let entry_data = if csman_header.compressed {
         // If the entries are compressed, decompress it (zlib compression)
         let Some(compressed_payload) = payload.get(COMPRESSED_HEADER_SIZE..) else {
-            return result;
+            return Ok(result);
         };
         match inflate::decompress_to_vec(compressed_payload) {
             Ok(data) => decompressed_data = data,
-            Err(_) => return result,
+            Err(_) => return Ok(result),
         }
         &decompressed_data[..]
     } else {
@@ -211,34 +218,32 @@ pub fn extract_csman_dat(
         }
     }
     if !result.success {
-        return result;
+        return Ok(result);
     }
 
     result.size = Some(csman_header.header_size + csman_header.data_size);
-    if let Some(output_directory) = output_directory {
-        // If extraction was requested, extract each entry using the entry key as the file name
-        let chroot = Chroot::new(output_directory);
-        // There may be more than one entry with the same key; track the key and how many times it was encountered
-        let mut processed_entries: HashMap<u32, usize> = HashMap::new();
 
-        for &(key, data) in &csman_entries {
-            // File name is [key value, in ASCII hex].dat
-            let mut file_name = format!("{key:08X}.dat");
-            // If this key value has already been extracted, file name is [key value, in ASCII hex].dat_[count]
-            let count = processed_entries.entry(key).or_insert(0);
-            if *count != 0 {
-                write!(file_name, "_{}", *count).unwrap();
-            }
-            *count += 1;
+    // Extract each entry using the entry key as the file name (a no-op for a dry-run chroot)
+    // There may be more than one entry with the same key; track the key and how many times it was encountered
+    let mut processed_entries: HashMap<u32, usize> = HashMap::new();
 
-            if !chroot.create_file(&file_name, data) {
-                result.success = false;
-                break;
-            }
+    for &(key, data) in &csman_entries {
+        // File name is [key value, in ASCII hex].dat
+        let mut file_name = format!("{key:08X}.dat");
+        // If this key value has already been extracted, file name is [key value, in ASCII hex].dat_[count]
+        let count = processed_entries.entry(key).or_insert(0);
+        if *count != 0 {
+            write!(file_name, "_{}", *count).unwrap();
+        }
+        *count += 1;
+
+        if !chroot.create_file(&file_name, data) {
+            result.success = false;
+            break;
         }
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -337,7 +342,11 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
 
-        let result = extract_csman_dat(&file_data, 0, Some(tmp.path()));
+        let sig = SignatureResult {
+            offset: 0,
+            ..Default::default()
+        };
+        let result = extract_csman_dat(&file_data, &sig, &Chroot::new(tmp.path())).unwrap();
         assert!(result.success);
         assert_eq!(result.size, Some(file_data.len()));
 

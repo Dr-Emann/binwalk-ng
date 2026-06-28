@@ -3,6 +3,7 @@ use crate::extractors::{Chroot, ExtractionError, ExtractionResult, Extractor, Ex
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use log::warn;
+use std::io;
 use std::path::Path;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
@@ -25,7 +26,11 @@ pub fn romfs_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, 
     };
 
     // Do an extraction dry run
-    let dry_run = extract_romfs(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run = extract_romfs(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the dry run was a success, everything should be good to go
     if dry_run.success
@@ -280,9 +285,10 @@ pub fn romfs_extractor() -> Extractor {
 /// Internal RomFS extractor
 pub fn extract_romfs(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Parse the RomFS header
@@ -301,38 +307,31 @@ pub fn extract_romfs(
                     result.success = true;
                     result.size = Some(romfs_header.image_size);
 
-                    // Do extraction, if an output directory was provided
-                    if let Some(output_directory) = output_directory {
-                        let mut file_count: usize = 0;
-                        let root_parent = "".to_string();
+                    // Extract the RomFS contents (writes are no-ops for a dry-run chroot).
+                    // RomFS files are extracted to a sub-directory under the extraction
+                    // directory whose name is the RomFS volume name.
+                    let mut file_count: usize = 0;
 
-                        // RomFS files will be extracted to a sub-directory under the specified
-                        // extraction directory whose name is the RomFS volume name.
-                        let chroot = Chroot::new(output_directory);
-                        let romfs_chroot_dir = chroot.chrooted_path(&romfs_header.volume_name);
+                    // Create the romfs volume directory, then extract the contents into it
+                    if chroot.create_directory(&romfs_header.volume_name) {
+                        file_count = extract_romfs_entries(
+                            romfs_data,
+                            &root_entries,
+                            &romfs_header.volume_name,
+                            chroot,
+                        );
+                    }
 
-                        // Create the romfs output directory, ensuring that it is contained inside the specified extraction directory
-                        if chroot.create_directory(&romfs_chroot_dir) {
-                            // Extract RomFS contents
-                            file_count = extract_romfs_entries(
-                                romfs_data,
-                                &root_entries,
-                                &root_parent,
-                                &romfs_chroot_dir,
-                            );
-                        }
-
-                        // If no files were extracted, extraction was a failure
-                        if file_count == 0 {
-                            result.success = false;
-                        }
+                    // If no files were extracted, extraction was a failure
+                    if file_count == 0 {
+                        result.success = false;
                     }
                 }
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 // Recursively processes all RomFS file entries and their children, and returns a list of RomFSEntry structures
@@ -444,12 +443,9 @@ fn extract_romfs_entries(
     romfs_data: &[u8],
     romfs_files: &Vec<RomFSEntry>,
     parent_directory: impl AsRef<Path>,
-    chroot_directory: impl AsRef<Path>,
+    chroot: &Chroot,
 ) -> usize {
     let mut file_count: usize = 0;
-
-    let chroot_directory = chroot_directory.as_ref();
-    let chroot = Chroot::new(chroot_directory);
 
     for file_entry in romfs_files {
         let extraction_success: bool;
@@ -487,12 +483,8 @@ fn extract_romfs_entries(
 
             // Extract the children of a directory
             if file_entry.directory && !file_entry.children.is_empty() {
-                file_count += extract_romfs_entries(
-                    romfs_data,
-                    &file_entry.children,
-                    &file_path,
-                    chroot_directory,
-                );
+                file_count +=
+                    extract_romfs_entries(romfs_data, &file_entry.children, &file_path, chroot);
             }
 
             // Make executable files executable

@@ -5,7 +5,7 @@ use crate::structures::{Endianness, StructureError, dyn_endian};
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable descriptions
@@ -84,7 +84,12 @@ pub fn symbol_table_parser(
         let symtab_start: usize = offset - MAGIC_OFFSET;
 
         // Do a dry-run extraction of the symbol table
-        let dry_run = extract_symbol_table(file_data, symtab_start, None);
+        let dry_run_sig = SignatureResult {
+            offset: symtab_start,
+            ..Default::default()
+        };
+        let dry_run =
+            extract_symbol_table(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
         // If dry run was a success, this is very likely a valid symbol table
         if dry_run.success {
@@ -201,12 +206,13 @@ pub fn vxworks_symtab_extractor() -> Extractor {
 /// Internal extractor for writing VxWorks symbol tables to JSON
 pub fn extract_symbol_table(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const MIN_VALID_ENTRIES: usize = 250;
     const OUTFILE_NAME: &str = "symtab.json";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     let available_data = file_data.len();
@@ -240,24 +246,20 @@ pub fn extract_symbol_table(
         result.success = true;
         result.size = Some(symtab_entry_offset - offset);
 
-        // This is not a drill!
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
+        // Write the symbol table out to disk (a no-op for a dry-run chroot)
+        // Convert symbol table entires to JSON
+        match serde_json::to_string_pretty(&symtab_entries) {
+            // This should never happen...
+            Err(e) => {
+                error!("Failed to convert VxWorks symbol table to JSON: {e}");
+            }
 
-            // Convert symbol table entires to JSON
-            match serde_json::to_string_pretty(&symtab_entries) {
-                // This should never happen...
-                Err(e) => {
-                    error!("Failed to convert VxWorks symbol table to JSON: {e}");
-                }
-
-                // Write JSON to file
-                Ok(symtab_json) => {
-                    result.success = chroot.create_file(OUTFILE_NAME, &symtab_json.into_bytes());
-                }
+            // Write JSON to file
+            Ok(symtab_json) => {
+                result.success = chroot.create_file(OUTFILE_NAME, &symtab_json.into_bytes());
             }
         }
     }
 
-    result
+    Ok(result)
 }

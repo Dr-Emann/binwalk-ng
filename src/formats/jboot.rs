@@ -4,7 +4,7 @@ use crate::signatures::{
     CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM, SignatureError, SignatureResult,
 };
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable descriptions
@@ -122,7 +122,12 @@ pub fn jboot_sch2_parser(
         ..Default::default()
     };
 
-    let dry_run = extract_jboot_sch2_kernel(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_jboot_sch2_kernel(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     if dry_run.success
         && let Some(total_size) = dry_run.size
@@ -386,12 +391,13 @@ pub fn sch2_extractor() -> Extractor {
 /// Extract the kernel described by a JBOOT SCH2 header
 pub fn extract_jboot_sch2_kernel(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Output file name
     const OUTFILE_NAME: &str = "kernel.bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Get the SCH2 data
@@ -409,18 +415,16 @@ pub fn extract_jboot_sch2_kernel(
                 result.size = Some(sch2_header.header_size + sch2_header.kernel_size);
                 result.success = true;
 
-                if let Some(output_directory) = output_directory {
-                    let chroot = Chroot::new(output_directory);
-                    result.success = chroot.carve_file(
-                        OUTFILE_NAME,
-                        file_data,
-                        kernel_start,
-                        sch2_header.kernel_size,
-                    );
-                }
+                // Carve out the kernel (a no-op for a dry-run chroot)
+                result.success = chroot.carve_file(
+                    OUTFILE_NAME,
+                    file_data,
+                    kernel_start,
+                    sch2_header.kernel_size,
+                );
             }
         }
     }
 
-    result
+    Ok(result)
 }

@@ -2,7 +2,7 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use liblzma::stream::{Action, Status, Stream};
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -66,7 +66,12 @@ pub fn lzma_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
          * If it succeeds, we have high confidence that this signature is valid.
          * Else, assume this is a false positive.
          */
-        let dry_run = lzma_decompress(file_data, offset, None);
+        let dry_run_sig = SignatureResult {
+            offset,
+            ..Default::default()
+        };
+        let dry_run =
+            lzma_decompress(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
         // Return success if dry run succeeded
         if dry_run.success
@@ -171,9 +176,9 @@ pub fn lzma_extractor() -> Extractor {
 /// Internal extractor for decompressing LZMA/XZ data streams
 pub fn lzma_decompress(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Output file name
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
     // Output buffer size
@@ -181,6 +186,7 @@ pub fn lzma_decompress(
     // Maximum memory limit: 4GB
     const MEM_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Output buffer
@@ -237,12 +243,12 @@ pub fn lzma_decompress(
                         }
                     }
 
-                    // Some data was decompressed successfully; if extraction was requested, write the data to disk.
-                    if let Some(output_directory) = output_directory {
+                    // Some data was decompressed successfully; write it out via the chroot
+                    // (a no-op for a dry-run chroot).
+                    {
                         // Number of decompressed bytes in the output buffer
                         let n = (decompressor.total_out() as usize) - bytes_written;
 
-                        let chroot = Chroot::new(output_directory);
                         if !chroot.append_to_file(OUTPUT_FILE_NAME, &output_buf[0..n]) {
                             // If writing data to disk fails, report failure and break
                             result.success = false;
@@ -262,5 +268,5 @@ pub fn lzma_decompress(
         }
     }
 
-    result
+    Ok(result)
 }

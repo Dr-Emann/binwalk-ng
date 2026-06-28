@@ -1,7 +1,7 @@
 use crate::extractors::Chroot;
 use adler32::RollingAdler32;
 use flate2::bufread::DeflateDecoder;
-use std::{io::Read, path::Path};
+use std::io::Read;
 
 #[derive(Debug, Default, Clone)]
 pub struct DeflateResult {
@@ -12,11 +12,10 @@ pub struct DeflateResult {
 
 /// Decompressor for inflating deflated data.
 /// For internal use, does not conform to the standard extractor format.
-pub fn inflate_decompressor(
-    file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> DeflateResult {
+///
+/// Decompressed data is written into `chroot`; pass a dry-run [`Chroot`] (see
+/// [`Chroot::dry_run`]) to validate/measure the deflate stream without writing anything.
+pub fn inflate_decompressor(file_data: &[u8], offset: usize, chroot: &Chroot) -> DeflateResult {
     // Size of decompression buffer
     const BLOCK_SIZE: usize = 8192;
     // Output file for decompressed data
@@ -50,12 +49,10 @@ pub fn inflate_decompressor(
                 if n > 0 {
                     adler32_checksum.update_buffer(&decompressed_buffer[0..n]);
 
-                    if let Some(output_directory) = output_directory {
-                        let chroot = Chroot::new(output_directory);
-                        if !chroot.append_to_file(OUTPUT_FILE_NAME, &decompressed_buffer[0..n]) {
-                            // If writing data to file fails, break
-                            break;
-                        }
+                    // Write the decompressed block (a no-op for a dry-run chroot)
+                    if !chroot.append_to_file(OUTPUT_FILE_NAME, &decompressed_buffer[0..n]) {
+                        // If writing data to file fails, break
+                        break;
                     }
                 }
 

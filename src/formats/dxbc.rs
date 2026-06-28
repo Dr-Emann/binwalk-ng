@@ -1,7 +1,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -133,11 +133,12 @@ pub fn dxbc_extractor() -> Extractor {
 
 pub fn extract_dxbc_file(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "shader.dxbc";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     if let Ok(header) = parse_dxbc_header(&file_data[offset..]) {
@@ -145,13 +146,9 @@ pub fn extract_dxbc_file(
         result.size = Some(header.size);
         result.success = true;
 
-        // Do extraction, if requested
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            result.success =
-                chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
-        }
+        // Carve out the shader (a no-op for a dry-run chroot)
+        result.success = chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
     }
 
-    result
+    Ok(result)
 }

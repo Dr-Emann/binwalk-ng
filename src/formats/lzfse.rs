@@ -3,7 +3,7 @@ use crate::extractors::Chroot;
 use crate::extractors::{ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -245,11 +245,12 @@ pub fn lzfse_extractor() -> Extractor {
 
 fn lzfse_decompress(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
 
+    let offset = signature.offset;
     let mut exresult = ExtractionResult::default();
 
     let data = &file_data[offset..];
@@ -278,11 +279,9 @@ fn lzfse_decompress(
     {
         exresult.success = true;
         exresult.size = Some(dst_size);
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            exresult.success = chroot.create_file(OUTPUT_FILE_NAME, &dst[..dst_size]);
-        }
+        // Write the decompressed data (a no-op for a dry-run chroot)
+        exresult.success = chroot.create_file(OUTPUT_FILE_NAME, &dst[..dst_size]);
     }
 
-    exresult
+    Ok(exresult)
 }

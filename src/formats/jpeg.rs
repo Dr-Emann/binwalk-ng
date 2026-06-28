@@ -1,6 +1,6 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "JPEG image";
@@ -25,7 +25,12 @@ pub fn jpeg_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
     };
 
     // Perform an extraction dry-run
-    let dry_run = extract_jpeg_image(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run =
+        extract_jpeg_image(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the dry-run was a success, this is probably a valid JPEG file
     if dry_run.success {
@@ -81,11 +86,12 @@ pub fn jpeg_extractor() -> Extractor {
 /// Internal extractor for carving JPEG images to disk
 pub fn extract_jpeg_image(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "image.jpg";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Find the JPEG EOF to identify the total JPEG size
@@ -93,14 +99,11 @@ pub fn extract_jpeg_image(
         result.size = Some(jpeg_data_size);
         result.success = true;
 
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            result.success =
-                chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
-        }
+        // Carve out the JPEG (a no-op for a dry-run chroot)
+        result.success = chroot.carve_file(OUTFILE_NAME, file_data, offset, result.size.unwrap());
     }
 
-    result
+    Ok(result)
 }
 
 /// Parses JPEG markers until the EOF marker is found

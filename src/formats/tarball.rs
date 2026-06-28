@@ -2,6 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors;
 use crate::extractors::{Chroot, ExtractionResult};
 use crate::signatures::{CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
+use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
@@ -184,26 +185,25 @@ pub fn tarball_extractor() -> extractors::Extractor {
 
 /// Internal extractor: unpacks a POSIX/GNU tar archive using the `tar` crate.
 ///
-/// When `output_directory` is `None`, this performs a dry run (the archive is parsed
-/// and validated, but nothing is written to disk).
+/// A dry-run [`Chroot`] (see [`Chroot::dry_run`]) parses and validates the archive without
+/// writing anything to disk.
 fn extract_tarball(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     let Some(tarball_data) = file_data.get(offset..) else {
-        return result;
+        return Ok(result);
     };
 
     let mut archive = Archive::new(tarball_data);
     let Ok(entries) = archive.entries() else {
-        return result;
+        return Ok(result);
     };
 
-    // None => dry run (validate only); Some => extract into this chroot.
-    let chroot = output_directory.map(Chroot::new);
     let mut extracted_something = false;
     let mut consumed: usize = 0;
 
@@ -239,12 +239,7 @@ fn extract_tarball(
             continue;
         };
 
-        // Dry run: validate only, don't touch the filesystem.
-        let Some(chroot) = &chroot else {
-            extracted_something = true;
-            continue;
-        };
-
+        // Extract the entry (writes are no-ops for a dry-run chroot).
         let entry_extracted = match entry_type {
             EntryType::Directory => {
                 let created = chroot.create_directory(&path);
@@ -295,11 +290,10 @@ fn extract_tarball(
         extracted_something |= entry_extracted;
     }
 
-    // Now that every file is in place, restore directory ownership and modes.
-    if let Some(chroot) = &chroot {
-        for (path, metadata) in &deferred_dir_metadata {
-            metadata.apply(chroot, path);
-        }
+    // Now that every file is in place, restore directory ownership and modes
+    // (a no-op for a dry-run chroot).
+    for (path, metadata) in &deferred_dir_metadata {
+        metadata.apply(chroot, path);
     }
 
     if extracted_something {
@@ -307,7 +301,7 @@ fn extract_tarball(
         result.size = Some(consumed);
     }
 
-    result
+    Ok(result)
 }
 
 /// Unix ownership and mode pulled from a tar entry header, used to restore an extracted

@@ -1,7 +1,7 @@
 use crate::extractors::inflate;
-use crate::extractors::{ExtractionResult, Extractor, ExtractorType};
+use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "Zlib compressed file";
@@ -25,7 +25,12 @@ pub fn zlib_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
     };
 
     // Decompress the zlib; no output directory specified, dry run only.
-    let decompression_dry_run = zlib_decompress(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let decompression_dry_run =
+        zlib_decompress(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the decompression dry run was a success, this signature is almost certianly valid
     if decompression_dry_run.success
@@ -74,17 +79,17 @@ pub fn zlib_extractor() -> Extractor {
 /// Internal extractor for decompressing ZLIB data
 pub fn zlib_decompress(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Size of the zlib header
     const HEADER_SIZE: usize = 2;
 
+    let offset = signature.offset;
     let mut exresult = ExtractionResult::default();
 
     // Do the decompression, ignoring the ZLIB header
-    let inflate_result =
-        inflate::inflate_decompressor(file_data, offset + HEADER_SIZE, output_directory);
+    let inflate_result = inflate::inflate_decompressor(file_data, offset + HEADER_SIZE, chroot);
 
     // Check that the data decompressed OK
     if inflate_result.success {
@@ -104,5 +109,5 @@ pub fn zlib_decompress(
         }
     }
 
-    exresult
+    Ok(exresult)
 }

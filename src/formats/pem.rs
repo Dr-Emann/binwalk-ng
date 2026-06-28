@@ -3,7 +3,7 @@ use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use aho_corasick::AhoCorasick;
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
-use std::path::Path;
+use std::io;
 
 /// Human readable descriptions
 pub const PEM_PUBLIC_KEY_DESCRIPTION: &str = "PEM public key";
@@ -87,7 +87,7 @@ pub fn pem_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
         }
 
         // Do an extraction dry-run to validate that this PEM file looks sane
-        let dry_run = pem_carver(file_data, offset, None, None);
+        let dry_run = pem_carver(file_data, offset, &Chroot::dry_run(), None);
         if dry_run.success
             && let Some(pem_size) = dry_run.size
         {
@@ -208,31 +208,39 @@ pub fn pem_certificate_extractor() -> Extractor {
 
 pub fn pem_certificate_carver(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const CERTIFICATE_FILE_NAME: &str = "pem.crt";
-    pem_carver(
+    Ok(pem_carver(
         file_data,
-        offset,
-        output_directory,
+        signature.offset,
+        chroot,
         Some(CERTIFICATE_FILE_NAME),
-    )
+    ))
 }
 
 pub fn pem_key_carver(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const KEY_FILE_NAME: &str = "pem.key";
-    pem_carver(file_data, offset, output_directory, Some(KEY_FILE_NAME))
+    Ok(pem_carver(
+        file_data,
+        signature.offset,
+        chroot,
+        Some(KEY_FILE_NAME),
+    ))
 }
 
+/// Shared PEM carving helper. `fname` is the output file name to carve to, or `None`
+/// to only validate/measure the PEM data without carving. Writing is performed through
+/// `chroot`, which is a no-op for a dry-run chroot.
 pub fn pem_carver(
     file_data: &[u8],
     offset: usize,
-    output_directory: Option<&Path>,
+    chroot: &Chroot,
     fname: Option<&str>,
 ) -> ExtractionResult {
     let mut result = ExtractionResult::default();
@@ -241,10 +249,7 @@ pub fn pem_carver(
         result.size = Some(pem_size);
         result.success = true;
 
-        if let Some(outfile) = fname
-            && let Some(output_directory) = output_directory
-        {
-            let chroot = Chroot::new(output_directory);
+        if let Some(outfile) = fname {
             result.success = chroot.carve_file(outfile, file_data, offset, result.size.unwrap());
         }
     }

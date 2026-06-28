@@ -1,7 +1,7 @@
 use crate::extractors::inflate;
-use crate::extractors::{ExtractionResult, Extractor, ExtractorType};
+use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const GPG_SIGNED_DESCRIPTION: &str = "GPG signed file";
@@ -28,7 +28,12 @@ pub fn gpg_signed_parser(
      * GPG signed files are just zlib compressed files with the zlib magic bytes replaced with the GPG magic bytes.
      * Decompress the signed file; no output directory specified, dry run only.
      */
-    let decompression_dry_run = gpg_decompress(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let decompression_dry_run =
+        gpg_decompress(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If the decompression dry run was a success, this signature is almost certianly valid
     if decompression_dry_run.success
@@ -74,17 +79,17 @@ pub fn gpg_extractor() -> Extractor {
 /// Internal extractor for decompressing signed GPG data
 pub fn gpg_decompress(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Size of the GPG header
     const HEADER_SIZE: usize = 2;
 
+    let offset = signature.offset;
     let mut exresult = ExtractionResult::default();
 
     // Do the decompression, ignoring the GPG header
-    let inflate_result =
-        inflate::inflate_decompressor(file_data, offset + HEADER_SIZE, output_directory);
+    let inflate_result = inflate::inflate_decompressor(file_data, offset + HEADER_SIZE, chroot);
 
     // Check that the data decompressed OK
     if inflate_result.success {
@@ -92,5 +97,5 @@ pub fn gpg_decompress(
         exresult.size = Some(HEADER_SIZE + inflate_result.size);
     }
 
-    exresult
+    Ok(exresult)
 }

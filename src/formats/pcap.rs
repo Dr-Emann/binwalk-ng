@@ -2,7 +2,7 @@ use crate::common::is_offset_safe;
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::{Endianness, StructureError, dyn_endian};
-use std::path::Path;
+use std::io;
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 /// Human readable description
@@ -24,7 +24,11 @@ pub fn pcapng_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult,
     };
 
     // Do an extraction dry-run
-    let dry_run = pcapng_carver(file_data, offset, None);
+    let dry_run_sig = SignatureResult {
+        offset,
+        ..Default::default()
+    };
+    let dry_run = pcapng_carver(file_data, &dry_run_sig, &Chroot::dry_run()).unwrap_or_default();
 
     // If dry-run was successful, this is almost certainly a valid pcap-ng file
     if dry_run.success
@@ -176,11 +180,13 @@ pub fn pcapng_extractor() -> Extractor {
 /// Carves a pcap-ng file to disk
 pub fn pcapng_carver(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     // Output file name
     const OUTPUT_FILE_NAME: &str = "capture.pcapng";
+
+    let offset = signature.offset;
 
     // Pcap-NG files must have at least two blocks: a section header block and an interface description block
     const MIN_BLOCK_COUNT: usize = 2;
@@ -224,14 +230,11 @@ pub fn pcapng_carver(
             result.size = Some(next_offset - offset);
             result.success = true;
 
-            // Do extraction if requested
-            if let Some(output_directory) = output_directory {
-                let chroot = Chroot::new(output_directory);
-                result.success =
-                    chroot.carve_file(OUTPUT_FILE_NAME, file_data, offset, result.size.unwrap());
-            }
+            // Carve out the capture (a no-op for a dry-run chroot)
+            result.success =
+                chroot.carve_file(OUTPUT_FILE_NAME, file_data, offset, result.size.unwrap());
         }
     }
 
-    result
+    Ok(result)
 }

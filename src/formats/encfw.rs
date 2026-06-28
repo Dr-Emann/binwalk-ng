@@ -1,7 +1,7 @@
 use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::signatures::{CONFIDENCE_LOW, CONFIDENCE_MEDIUM, SignatureError, SignatureResult};
 use std::collections::HashMap;
-use std::path::Path;
+use std::io;
 
 /// Known encrypted firmware magics and their associated make/model
 fn encfw_known_firmware() -> HashMap<Vec<u8>, String> {
@@ -97,22 +97,20 @@ pub fn encfw_extractor() -> Extractor {
 /// Attempts to decrypt known encrypted firmware images
 pub fn encfw_decrypt(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTPUT_FILE_NAME: &str = "decrypted.bin";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     if let Ok(decrypted_data) = delink::decrypt(&file_data[offset..]) {
         result.success = true;
 
-        // Write to file, if requested
-        if let Some(output_directory) = output_directory {
-            let chroot = Chroot::new(output_directory);
-            result.success = chroot.create_file(OUTPUT_FILE_NAME, &decrypted_data);
-        }
+        // Write to file (a no-op for a dry-run chroot)
+        result.success = chroot.create_file(OUTPUT_FILE_NAME, &decrypted_data);
     }
 
-    result
+    Ok(result)
 }

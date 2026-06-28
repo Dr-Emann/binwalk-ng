@@ -2,7 +2,7 @@ use crate::extractors::{Chroot, ExtractionResult, Extractor, ExtractorType};
 use crate::formats::zip;
 use crate::formats::zip::find_zip_eof;
 use crate::signatures::{SignatureError, SignatureResult};
-use std::path::Path;
+use std::io;
 
 /// Human readable description
 pub const DESCRIPTION: &str = "Dahua ZIP archive";
@@ -61,12 +61,13 @@ pub fn dahua_zip_extractor() -> Extractor {
 /// Carves out a Dahua ZIP file and converts it to a normal ZIP file
 pub fn extract_dahua_zip(
     file_data: &[u8],
-    offset: usize,
-    output_directory: Option<&Path>,
-) -> ExtractionResult {
+    signature: &SignatureResult,
+    chroot: &Chroot,
+) -> io::Result<ExtractionResult> {
     const OUTFILE_NAME: &str = "dahua.zip";
     const ZIP_HEADER: &[u8] = b"PK";
 
+    let offset = signature.offset;
     let mut result = ExtractionResult::default();
 
     // Locate the end of the zip archive
@@ -75,32 +76,28 @@ pub fn extract_dahua_zip(
         result.size = Some(zip_info.eof - offset);
         result.success = true;
 
-        // If extraction was requested, carve the zip archive to disk, replacing the Dahua ZIP magic bytes
-        // with the standard ZIP magic bytes.
-        if let Some(output_directory) = output_directory {
-            // Start and end offsets of the data to carve
-            let start_data = offset + ZIP_HEADER.len();
-            let end_data = offset + result.size.unwrap();
+        // Carve the zip archive to disk, replacing the Dahua ZIP magic bytes with the standard
+        // ZIP magic bytes (a no-op for a dry-run chroot).
+        // Start and end offsets of the data to carve
+        let start_data = offset + ZIP_HEADER.len();
+        let end_data = offset + result.size.unwrap();
 
-            let chroot = Chroot::new(output_directory);
-
-            // Get the data to carve
-            match file_data.get(start_data..end_data) {
-                None => {
+        // Get the data to carve
+        match file_data.get(start_data..end_data) {
+            None => {
+                result.success = false;
+            }
+            Some(zip_data) => {
+                // First write the normal ZIP header magic bytes to disk
+                if !chroot.create_file(OUTFILE_NAME, ZIP_HEADER) {
                     result.success = false;
-                }
-                Some(zip_data) => {
-                    // First write the normal ZIP header magic bytes to disk
-                    if !chroot.create_file(OUTFILE_NAME, ZIP_HEADER) {
-                        result.success = false;
-                    } else {
-                        // Append the rest of the ZIP archive to disk
-                        result.success = chroot.append_to_file(OUTFILE_NAME, zip_data);
-                    }
+                } else {
+                    // Append the rest of the ZIP archive to disk
+                    result.success = chroot.append_to_file(OUTFILE_NAME, zip_data);
                 }
             }
         }
     }
 
-    result
+    Ok(result)
 }
