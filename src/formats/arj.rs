@@ -99,8 +99,9 @@ pub fn parse_arj_header(arj_data: &[u8]) -> Result<ARJHeader, StructureError> {
 
     // Minimum header data block size (excluding magic + basic_hdr_size)
     const HDR_PREFIX_SIZE: usize = std::mem::size_of::<zerocopy::U16<LE>>() * 2;
-    const CRC_SIZE: usize = std::mem::size_of::<u32>();
     const MIN_HDR_SIZE: usize = std::mem::size_of::<ARJHeaderBytes>() - HDR_PREFIX_SIZE;
+    const CRC_SIZE: usize = std::mem::size_of::<u32>();
+
     if basic_hdr_size < MIN_HDR_SIZE || HDR_DATA_OFFSET + basic_hdr_size + CRC_SIZE > arj_data.len()
     {
         return Err(StructureError);
@@ -197,7 +198,7 @@ pub fn parse_arj_header(arj_data: &[u8]) -> Result<ARJHeader, StructureError> {
         .map_or_else(|| "".to_string(), get_cstring);
 
     Ok(ARJHeader {
-        header_size: first_hdr_size,
+        header_size: HDR_DATA_OFFSET + basic_hdr_size + CRC_SIZE,
         version: arj_header.archiver_version,
         min_version: arj_header.min_version,
         flags,
