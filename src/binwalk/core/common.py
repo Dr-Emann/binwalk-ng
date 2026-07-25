@@ -238,8 +238,8 @@ class MathExpression(object):
         return self._eval(ast.parse(expr).body[0].value)
 
     def _eval(self, node):
-        if isinstance(node, ast.Num):  # <number>
-            return node.n
+        if isinstance(node, ast.Constant):  # <number>
+            return node.value
         elif isinstance(node, ast.operator):  # <operator>
             return self.OPERATORS[type(node.op)]
         elif isinstance(node, ast.UnaryOp):
