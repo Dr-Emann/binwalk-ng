@@ -16,7 +16,7 @@ use std::os::windows;
 #[cfg(unix)]
 use std::os::unix;
 
-use crate::common::{is_offset_safe, read_file};
+use crate::common::{is_offset_safe, read_or_map_file};
 use crate::extractors;
 use crate::magic;
 use crate::signatures;
@@ -83,6 +83,11 @@ pub struct Binwalk {
     pub pattern_signature_table: HashMap<usize, signatures::Signature>,
     /// Maps signatures to their corresponding extractors
     pub extractor_lookup_table: HashMap<String, Option<extractors::Extractor>>,
+    /// If the mmap call is allowed to be used for reading files
+    ///
+    /// Binwalk may abort unexpectedly if mmap is used and the analyzed file(s) are simultaneously
+    /// truncated.
+    pub allow_mmap: bool,
 }
 
 impl Binwalk {
@@ -137,7 +142,10 @@ impl Binwalk {
         signatures: Option<Vec<signatures::Signature>>,
         full_search: bool,
     ) -> Result<Self, BinwalkError> {
-        let mut new_instance = Self::default();
+        let mut new_instance = Self {
+            allow_mmap: true,
+            ..Default::default()
+        };
 
         // Target file is optional, especially if being called via the library
         if let Some(target_file) = target_file_name {
@@ -775,12 +783,16 @@ impl Binwalk {
     pub fn analyze(&self, target_file: impl AsRef<Path>, do_extraction: bool) -> AnalysisResults {
         let file_path = target_file.as_ref();
 
-        let file_data = read_file(file_path).unwrap_or_else(|_| {
-            error!("Failed to read data from {}", file_path.display());
-            b"".to_vec()
-        });
+        let file_data = read_or_map_file(file_path, self.allow_mmap);
+        let file_data: &[u8] = file_data
+            .as_ref()
+            .map(|data| data.as_ref())
+            .unwrap_or_else(|_| {
+                error!("Failed to read data from {}", file_path.display());
+                b""
+            });
 
-        self.analyze_buf(&file_data, file_path, do_extraction)
+        self.analyze_buf(file_data, file_path, do_extraction)
     }
 }
 

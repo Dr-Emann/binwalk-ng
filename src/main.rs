@@ -109,7 +109,7 @@ fn main() -> ExitCode {
     }
 
     // Initialize binwalk
-    let binwalker = match binwalk_ng::Binwalk::configure(
+    let mut binwalker = match binwalk_ng::Binwalk::configure(
         cli_args.file_name.as_deref(),
         output_directory.as_deref(),
         cli_args.include,
@@ -123,6 +123,7 @@ fn main() -> ExitCode {
         }
         Ok(bw) => bw,
     };
+    binwalker.allow_mmap = !cli_args.no_mmap;
     let binwalker = Arc::new(binwalker);
 
     // If the user specified --threads, honor that request; else, auto-detect available parallelism
@@ -343,17 +344,21 @@ fn spawn_worker(
     pending.fetch_add(1, Ordering::Release);
     pool.spawn(move || {
         // Read in file data
-        let file_data = common::read_file(&target_file).unwrap_or_else(|_| {
-            error!("Failed to read {} data", target_file.display());
-            b"".to_vec()
-        });
+        let file_data = common::read_or_map_file(&target_file, bw.allow_mmap);
+        let file_data: &[u8] = file_data
+            .as_ref()
+            .map(|data| data.as_ref())
+            .unwrap_or_else(|_| {
+                error!("Failed to read {} data", target_file.display());
+                b""
+            });
 
         // Analyze target file, with extraction, if specified
-        let results = bw.analyze_buf(&file_data, &target_file, do_extraction);
+        let results = bw.analyze_buf(file_data, &target_file, do_extraction);
 
         // If data carving was requested as part of extraction, carve analysis results to disk
         if do_carve {
-            let carve_count = carve_file_map(&file_data, &results);
+            let carve_count = carve_file_map(file_data, &results);
             info!(
                 "Carved {carve_count} data blocks to disk from {}",
                 target_file.display()
