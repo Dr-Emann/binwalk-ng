@@ -356,11 +356,10 @@ impl Binwalk {
 
                 // Get the signature associated with this magic signature
                 let magic_pattern_index = magic_match.pattern().as_usize();
-                let signature: signatures::Signature = self
+                let signature: &signatures::Signature = self
                     .pattern_signature_table
                     .get(&magic_pattern_index)
-                    .unwrap()
-                    .clone();
+                    .unwrap();
 
                 debug!(
                     "Found {} magic match at offset {:#X}",
@@ -383,7 +382,7 @@ impl Binwalk {
                     }
 
                     // Auto populate some signature result fields
-                    signature_result_auto_populate(&mut signature_result, &signature);
+                    signature_result_auto_populate(&mut signature_result, signature);
 
                     // Add this signature to the file map
                     file_map.push(signature_result.clone());
