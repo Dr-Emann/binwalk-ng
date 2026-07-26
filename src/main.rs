@@ -123,6 +123,7 @@ fn main() -> ExitCode {
         }
         Ok(bw) => bw,
     };
+    let binwalker = Arc::new(binwalker);
 
     // If the user specified --threads, honor that request; else, auto-detect available parallelism
     let available_workers = cli_args.threads.map(|t| t as usize).unwrap_or_else(|| {
@@ -331,7 +332,7 @@ fn process_analysis_results(
 /// Spawn a worker thread to analyze a file
 fn spawn_worker(
     pool: &ThreadPool,
-    bw: binwalk_ng::Binwalk,
+    bw: Arc<binwalk_ng::Binwalk>,
     target_file: impl AsRef<Path>,
     do_extraction: bool,
     do_carve: bool,
