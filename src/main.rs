@@ -125,7 +125,7 @@ fn main() -> ExitCode {
     };
 
     // If the user specified --threads, honor that request; else, auto-detect available parallelism
-    let available_workers = cli_args.threads.unwrap_or_else(|| {
+    let available_workers = cli_args.threads.map(|t| t as usize).unwrap_or_else(|| {
         // Get CPU core info
         match thread::available_parallelism() {
             // In case of error use the default

@@ -61,7 +61,7 @@ pub struct CliArgs {
 
     /// Manually specify the number of threads to use
     #[arg(short, long, value_name = "INT", value_parser = clap::value_parser!(u64).range(1..))]
-    pub threads: Option<usize>,
+    pub threads: Option<u64>,
 
     /// Do not scan for these signatures
     #[arg(
