@@ -356,12 +356,6 @@ fn extract_chunk<W: io::Write + io::Seek>(
             write_hole(out_file, sparse_header.block_size, chunk_header.block_count)
         }
         ChunkType::Fill => {
-            // The parser rejects FILL chunks whose payload isn't the spec-required
-            // 4 bytes, but guard here too: an empty fill value would make the inner
-            // loop below spin forever.
-            if chunk_data.is_empty() {
-                return false;
-            }
             // Fill chunks are block_count blocks that contain a repeated sequence of data (typically 4-bytes repeated over and over again)
             let repeat_count = sparse_header.block_size.div_ceil(chunk_data.len());
             let fill_block = chunk_data.repeat(repeat_count);
