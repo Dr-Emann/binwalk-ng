@@ -178,6 +178,7 @@ pub fn parse_android_sparse_chunk_header(
     let data_size = (chunk_header.total_size.get() as usize)
         .checked_sub(header_size)
         .ok_or(StructureError)?;
+    let block_count = chunk_header.output_block_count.get() as usize;
 
     // The chunk type must be one of the known chunk types, and the payload size must
     // match their declared type. In particular, a FILL chunk with data_size == 0 would
@@ -185,7 +186,7 @@ pub fn parse_android_sparse_chunk_header(
     let chunk_type = match chunk_header.chunk_type.get() {
         CHUNK_TYPE_FILL if data_size == FILL_DATA_SIZE => ChunkType::Fill,
         CHUNK_TYPE_DONT_CARE if data_size == DONT_CARE_DATA_SIZE => ChunkType::DontCare,
-        CHUNK_TYPE_CRC if data_size == CRC_DATA_SIZE => ChunkType::Crc,
+        CHUNK_TYPE_CRC if data_size == CRC_DATA_SIZE && block_count == 0 => ChunkType::Crc,
         // validated by the extractor, which has access to the sparse header
         CHUNK_TYPE_RAW => ChunkType::Raw,
         _ => return Err(StructureError),
@@ -195,7 +196,7 @@ pub fn parse_android_sparse_chunk_header(
         header_size,
         data_size,
         chunk_type,
-        block_count: chunk_header.output_block_count.get() as usize,
+        block_count,
     })
 }
 
@@ -298,18 +299,16 @@ pub fn extract_android_sparse(
                         }
                     }
 
+                    let chunk_data_start: usize = next_chunk_offset + chunk_header.header_size;
+                    let chunk_data_end: usize = chunk_data_start + chunk_header.data_size;
+                    let Some(chunk_data) = file_data.get(chunk_data_start..chunk_data_end) else {
+                        break;
+                    };
                     // If not a dry run, extract the data from the next chunk
-                    if let Some(out_file) = &mut out_file {
-                        let chunk_data_start: usize = next_chunk_offset + chunk_header.header_size;
-                        let chunk_data_end: usize = chunk_data_start + chunk_header.data_size;
-
-                        if let Some(chunk_data) = file_data.get(chunk_data_start..chunk_data_end) {
-                            if !extract_chunk(&sparse_header, &chunk_header, chunk_data, out_file) {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
+                    if let Some(out_file) = &mut out_file
+                        && !extract_chunk(&sparse_header, &chunk_header, chunk_data, out_file)
+                    {
+                        break;
                     }
 
                     processed_chunk_count += 1;
