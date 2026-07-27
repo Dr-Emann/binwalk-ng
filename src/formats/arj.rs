@@ -143,7 +143,7 @@ pub fn parse_arj_header(arj_data: &[u8]) -> Result<ARJHeader, StructureError> {
         1 => "PRIMOS",
         2 => "UNIX",
         3 => "AMIGA",
-        4 => "MAX-OS",
+        4 => "MAC-OS",
         5 => "OS/2",
         6 => "APPLE GS",
         7 => "ATARI ST",
