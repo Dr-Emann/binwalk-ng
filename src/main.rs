@@ -190,27 +190,25 @@ fn main() -> ExitCode {
         }
 
         debug_assert!(target_files.is_empty() && outstanding_files > 0);
-        match worker_rx.recv_timeout(next_progress.saturating_duration_since(time::Instant::now()))
+        if let Ok(results) =
+            worker_rx.recv_timeout(next_progress.saturating_duration_since(time::Instant::now()))
         {
-            Ok(results) => {
-                process_analysis_results(
-                    results,
-                    &mut file_count,
-                    &mut json_logger,
-                    flags,
-                    &mut target_files,
-                );
-                outstanding_files -= 1;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Some debug info on analysis progress
-                info!(
-                    "Status: pending tasks: {}/{}",
-                    outstanding_files, available_workers,
-                );
-                next_progress = time::Instant::now() + PROGRESS_INTERVAL;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => unreachable!("worker_tx is never closed"),
+            process_analysis_results(
+                results,
+                &mut file_count,
+                &mut json_logger,
+                flags,
+                &mut target_files,
+            );
+            outstanding_files -= 1;
+        }
+        if time::Instant::now() >= next_progress {
+            // Some debug info on analysis progress
+            info!(
+                "Status: pending tasks: {}/{}",
+                outstanding_files, available_workers,
+            );
+            next_progress = time::Instant::now() + PROGRESS_INTERVAL;
         }
     }
 
