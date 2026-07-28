@@ -3,14 +3,12 @@ use binwalk_ng::{AnalysisResults, common, extractors};
 use clap::Parser;
 use log::{debug, error, info};
 use rayon::ThreadPool;
-use std::collections::VecDeque;
 use std::panic;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time;
@@ -26,7 +24,7 @@ fn main() -> ExitCode {
     const DEFAULT_WORKER_COUNT: usize = 1;
 
     // Number of seconds to wait before printing debug progress info
-    const PROGRESS_INTERVAL: u64 = 30;
+    const PROGRESS_INTERVAL: time::Duration = time::Duration::from_secs(30);
 
     // If this env var is set during extraction, the Binwalk.base_target_file symlink will
     // be deleted at the end of extraction.
@@ -35,16 +33,9 @@ fn main() -> ExitCode {
     // Output directory for extracted files
     let mut output_directory: Option<PathBuf> = None;
 
-    /*
-     * Queue of files waiting to be analyzed.
-     * Grows when matryoshka mode discovers nested files in extraction results.
-     */
-    let mut target_files = VecDeque::new();
-
     // Statistics variables; keeps track of analyzed file count and total analysis run time
     let mut file_count: usize = 0;
     let run_time = time::Instant::now();
-    let mut last_progress_interval = time::Instant::now();
 
     // Initialize logging with local timezone timestamps
     env_logger::Builder::from_env(env_logger::Env::default())
@@ -150,7 +141,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pending = Arc::new(AtomicUsize::new(0));
     let (worker_tx, worker_rx) = mpsc::channel();
 
     /*
@@ -164,14 +154,6 @@ fn main() -> ExitCode {
         process::exit(-1);
     }));
 
-    debug!(
-        "Queuing initial target file: {}",
-        binwalker.base_target_file.display()
-    );
-
-    // Queue the initial file path
-    target_files.push_back(binwalker.base_target_file.clone());
-
     let flags = AnalysisFlags {
         verbose: cli_args.verbose,
         quiet: cli_args.quiet,
@@ -179,13 +161,24 @@ fn main() -> ExitCode {
         matryoshka: cli_args.matryoshka,
     };
 
+    debug!(
+        "Queuing initial target file: {}",
+        binwalker.base_target_file.display()
+    );
+    // Files waiting to be analyzed, start with the base file only.
+    // In matryoshka mode, grows as new nested files are discovered in extraction results
+    let mut target_files = vec![binwalker.base_target_file.clone()];
+    let mut outstanding_files = 0u64;
+    let mut next_progress = time::Instant::now() + PROGRESS_INTERVAL;
     /*
      * Main loop.
      * Loop until all pending thread jobs are complete and there are no more files in the queue.
      */
-    loop {
+    while !target_files.is_empty() || outstanding_files > 0 {
         // Drain any queued files into the thread pool
-        while let Some(target_file) = target_files.pop_front() {
+        #[allow(clippy::iter_with_drain)] // https://github.com/rust-lang/rust-clippy/issues/8539
+        for target_file in target_files.drain(..) {
+            outstanding_files += 1;
             spawn_worker(
                 &workers,
                 binwalker.clone(),
@@ -193,29 +186,13 @@ fn main() -> ExitCode {
                 cli_args.extract,
                 cli_args.carve,
                 worker_tx.clone(),
-                pending.clone(),
             );
         }
 
-        // Don't spin CPU cycles if there is no backlog of files to analyze
-        if target_files.is_empty() {
-            let sleep_time = time::Duration::from_millis(1);
-            thread::sleep(sleep_time);
-        }
-
-        // Some debug info on analysis progress
-        if last_progress_interval.elapsed().as_secs() >= PROGRESS_INTERVAL {
-            info!(
-                "Status: pending tasks: {}/{}, files waiting in queue: {}",
-                pending.load(Ordering::Acquire),
-                available_workers,
-                target_files.len()
-            );
-            last_progress_interval = time::Instant::now();
-        }
-
-        // Drain all available results from the channel
-        while let Ok(results) = worker_rx.try_recv() {
+        debug_assert!(target_files.is_empty() && outstanding_files > 0);
+        if let Ok(results) =
+            worker_rx.recv_timeout(next_progress.saturating_duration_since(time::Instant::now()))
+        {
             process_analysis_results(
                 results,
                 &mut file_count,
@@ -223,22 +200,15 @@ fn main() -> ExitCode {
                 flags,
                 &mut target_files,
             );
+            outstanding_files -= 1;
         }
-
-        // Exit only when no work remains and the channel is truly empty
-        if pending.load(Ordering::Acquire) == 0 && target_files.is_empty() {
-            match worker_rx.try_recv() {
-                Ok(results) => {
-                    process_analysis_results(
-                        results,
-                        &mut file_count,
-                        &mut json_logger,
-                        flags,
-                        &mut target_files,
-                    );
-                }
-                Err(_) => break,
-            }
+        if time::Instant::now() >= next_progress {
+            // Some debug info on analysis progress
+            info!(
+                "Status: pending tasks: {}/{}",
+                outstanding_files, available_workers,
+            );
+            next_progress = time::Instant::now() + PROGRESS_INTERVAL;
         }
     }
 
@@ -302,7 +272,7 @@ fn process_analysis_results(
     file_count: &mut usize,
     json_logger: &mut json::JsonLogger,
     flags: AnalysisFlags,
-    target_files: &mut VecDeque<PathBuf>,
+    target_files: &mut Vec<PathBuf>,
 ) {
     *file_count += 1;
     json_logger.log(json::JSONType::Analysis(results.clone()));
@@ -333,14 +303,11 @@ fn process_analysis_results(
 fn spawn_worker(
     pool: &ThreadPool,
     bw: Arc<binwalk_ng::Binwalk>,
-    target_file: impl AsRef<Path>,
+    target_file: PathBuf,
     do_extraction: bool,
     do_carve: bool,
     worker_tx: mpsc::Sender<AnalysisResults>,
-    pending: Arc<AtomicUsize>,
 ) {
-    let target_file = target_file.as_ref().to_path_buf();
-    pending.fetch_add(1, Ordering::Release);
     pool.spawn(move || {
         // Read in file data
         let file_data = common::read_file(&target_file).unwrap_or_else(|_| {
@@ -367,8 +334,6 @@ fn spawn_worker(
                 target_file.display()
             );
         }
-
-        pending.fetch_sub(1, Ordering::Release);
     });
 }
 
