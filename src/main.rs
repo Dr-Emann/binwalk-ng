@@ -127,20 +127,14 @@ fn main() -> ExitCode {
     };
 
     // Initialize binwalk
-    let mut binwalker = match binwalk_ng::Binwalk::configure(
-        cli_args.include,
-        cli_args.exclude,
-        None,
-        cli_args.search_all,
-    ) {
-        Err(e) => {
-            error!("Binwalk initialization failed: {}", e.message);
-            return ExitCode::FAILURE;
-        }
-        Ok(bw) => bw,
-    };
-    binwalker.allow_mmap = !cli_args.no_mmap;
-    let binwalker = Arc::new(binwalker);
+    let binwalker = Arc::new(
+        binwalk_ng::Binwalk::builder()
+            .includes(cli_args.include)
+            .excludes(cli_args.exclude)
+            .full_search(cli_args.search_all)
+            .no_mmap(cli_args.no_mmap)
+            .build(),
+    );
 
     // If the user specified --threads, honor that request; else, auto-detect available parallelism
     let available_workers = cli_args.threads.map(|t| t as usize).unwrap_or_else(|| {
@@ -254,8 +248,8 @@ fn main() -> ExitCode {
         cli_args.quiet,
         run_time,
         file_count,
-        binwalker.signature_count,
-        binwalker.pattern_count,
+        binwalker.signature_count(),
+        binwalker.pattern_count(),
     );
 
     ExitCode::SUCCESS
@@ -408,7 +402,7 @@ fn spawn_worker(
 ) {
     pool.spawn(move || {
         // Read in file data
-        let file_data = common::read_or_map_file(&target_file, bw.allow_mmap);
+        let file_data = common::read_or_map_file(&target_file, bw.allow_mmap());
         let file_data: &[u8] = file_data
             .as_ref()
             .map(|data| data.as_ref())

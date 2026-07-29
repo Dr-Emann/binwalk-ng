@@ -74,8 +74,7 @@ pub fn trailing_data_test(signature_filter: &str, file_name: &str) {
     std::io::Write::write_all(&mut tmp, &data).unwrap();
 
     let output_directory = tempfile::tempdir().unwrap();
-    let binwalker = Binwalk::configure(vec![signature_filter.to_string()], vec![], None, false)
-        .expect("Binwalk initialization failed");
+    let binwalker = Binwalk::builder().include(signature_filter).build();
 
     let results = binwalker.analyze(tmp.path(), Some(output_directory.path()));
 
@@ -102,8 +101,7 @@ pub fn run_binwalk(signature_filter: &str, file_name: impl AsRef<Path>) -> Analy
     let output_directory = tempfile::tempdir().unwrap();
 
     // Configure binwalk
-    let binwalker = Binwalk::configure(vec![signature_filter.to_string()], vec![], None, false)
-        .expect("Binwalk initialization failed");
+    let binwalker = Binwalk::builder().include(signature_filter).build();
 
     binwalker.analyze(&file_path, Some(output_directory.path()))
 }
