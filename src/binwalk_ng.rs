@@ -4,6 +4,7 @@ use aho_corasick::AhoCorasick;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -13,6 +14,23 @@ use crate::extractors;
 use crate::formats::program_store;
 use crate::magic;
 use crate::signatures;
+
+/// Returned by [`BinwalkBuilder::build`] when the configured signatures cannot be
+/// searched for, e.g. because their magic patterns are too numerous or too large.
+#[derive(Debug)]
+pub struct BuildError(aho_corasick::BuildError);
+
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to build the magic pattern searcher: {}", self.0)
+    }
+}
+
+impl std::error::Error for BuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 
 /// Analysis results returned by Binwalk::analyze
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -52,9 +70,12 @@ pub struct Binwalk {
     pattern_count: usize,
     /// A list of signatures that must start at offset 0
     short_signatures: Vec<signatures::Signature>,
-    /// A list of magic bytes to search for throughout the entire file
-    patterns: Vec<Vec<u8>>,
-    /// Signatures, with same indices as patterns
+    /// Searches for all magic byte patterns throughout the entire file, all at once
+    grep: AhoCorasick,
+    /// Signatures, indexed by their pattern's index in `grep`
+    ///
+    /// The synthetic all-zero pattern has no signature, so it has no entry here; it is
+    /// always the last pattern in `grep`, so this is one shorter whenever there is one.
     signatures: Vec<signatures::Signature>,
     /// Maps signatures to their corresponding extractors
     extractor_lookup_table: HashMap<String, Option<extractors::Extractor>>,
@@ -72,6 +93,9 @@ pub struct Binwalk {
     max_leading_zeros: usize,
     /// Length of the synthetic all-zero pattern that [`Binwalk::scan`] searches for in order to
     /// spot a run of zero bytes it can skip past, or `None` if no run can be skipped
+    ///
+    /// It is the last pattern in [`Binwalk::grep`] when present; see
+    /// [`Binwalk::zero_run_pattern_index`].
     ///
     /// Runs of zero bytes are common padding, and a magic pattern of all zero bytes matches at
     /// every offset in one, so a scan would otherwise validate a candidate per byte of padding.
@@ -124,7 +148,8 @@ impl Default for Binwalk {
 /// let binwalker = Binwalk::builder()
 ///     .exclude("jpeg")
 ///     .exclude("png")
-///     .build();
+///     .build()
+///     .unwrap();
 /// ```
 #[must_use = "Builder does nothing unless built"]
 #[derive(Debug, Default, Clone)]
@@ -198,18 +223,25 @@ impl BinwalkBuilder {
     }
 
     /// Build a [`Binwalk`] instance with this configuration.
-    pub fn build(self) -> Binwalk {
-        let mut new_instance = Binwalk {
-            signature_count: 0,
-            pattern_count: 0,
-            short_signatures: vec![],
-            patterns: vec![],
-            signatures: vec![],
-            extractor_lookup_table: HashMap::new(),
-            no_mmap: self.no_mmap,
-            max_leading_zeros: 0,
-            zero_run_pattern_len: Some(0),
-        };
+    ///
+    /// ## Errors
+    ///
+    /// Returns a [`BuildError`] if the configured signatures' magic patterns cannot be
+    /// compiled into a searcher, which in practice means there are too many of them, or
+    /// they are too large.
+    pub fn build(self) -> Result<Binwalk, BuildError> {
+        let mut signature_count = 0;
+        let mut pattern_count = 0;
+        let mut short_signatures = vec![];
+        let mut patterns: Vec<Vec<u8>> = vec![];
+
+        let mut signatures = vec![];
+        let mut extractor_lookup_table = HashMap::new();
+
+        // The most leading zero bytes in any magic pattern that has a non-zero byte
+        let mut max_leading_zeros = 0;
+        // Length of the synthetic all-zero pattern; see Binwalk::zero_run_pattern_len
+        let mut zero_run_pattern_len = Some(0);
 
         let mut signature_patterns = magic::patterns();
         signature_patterns.extend(self.signatures);
@@ -222,21 +254,19 @@ impl BinwalkBuilder {
             }
 
             // Keep a count of total unique signatures that are supported
-            new_instance.signature_count += 1;
+            signature_count += 1;
 
             // Keep a count of the total number of magic patterns
-            new_instance.pattern_count += signature.magic.len();
+            pattern_count += signature.magic.len();
 
             // Create a lookup table which associates each signature to its respective extractor
-            new_instance
-                .extractor_lookup_table
-                .insert(signature.name.clone(), signature.extractor.clone());
+            extractor_lookup_table.insert(signature.name.clone(), signature.extractor.clone());
 
             // Each signature may have multiple magic bytes associated with it
             for pattern in &signature.magic {
                 if signature.short && !self.full_search {
                     // These are short patterns, and should only be searched for at the very beginning of a file
-                    new_instance.short_signatures.push(signature.clone());
+                    short_signatures.push(signature.clone());
                     break;
                 }
 
@@ -244,8 +274,7 @@ impl BinwalkBuilder {
                 // skipping it; see Binwalk::zero_run_pattern_len.
                 let longest_matching_zeros = match pattern.iter().position(|&b| b != 0) {
                     Some(leading_zeros) => {
-                        new_instance.max_leading_zeros =
-                            new_instance.max_leading_zeros.max(leading_zeros);
+                        max_leading_zeros = max_leading_zeros.max(leading_zeros);
                         Some(longest_zero_run(pattern))
                     }
                     // An all-zero magic says nothing about where a valid signature can begin,
@@ -267,26 +296,48 @@ impl BinwalkBuilder {
                         None
                     }
                 };
-                new_instance.zero_run_pattern_len =
-                    match (new_instance.zero_run_pattern_len, longest_matching_zeros) {
-                        (Some(len), Some(matchable_zeros)) => Some(len.max(matchable_zeros + 1)),
-                        _ => None,
-                    };
+                zero_run_pattern_len = match (zero_run_pattern_len, longest_matching_zeros) {
+                    (Some(len), Some(matchable_zeros)) => Some(len.max(matchable_zeros + 1)),
+                    _ => None,
+                };
 
-                new_instance.signatures.push(signature.clone());
+                signatures.push(signature.clone());
 
                 // Add these magic bytes to the list of patterns
-                new_instance.patterns.push(pattern.to_vec());
+                patterns.push(pattern.to_vec());
             }
         }
 
-        new_instance
+        // Searched alongside the real patterns to spot runs of zero bytes that can be skipped
+        // past. The length is only zero when there are no real patterns to search for at all, and
+        // an empty pattern would match at every offset.
+        let zero_run_pattern_len = zero_run_pattern_len.filter(|&len| len > 0);
+        patterns.extend(zero_run_pattern_len.map(|len| vec![0u8; len]));
+
+        /*
+         * Same pattern matching algorithm used by fgrep.
+         * This searches for all magic byte patterns in the file data, all at once.
+         * https://en.wikipedia.org/wiki/Aho–Corasick_algorithm
+         */
+        let grep = AhoCorasick::new(patterns).map_err(BuildError)?;
+
+        Ok(Binwalk {
+            signature_count,
+            pattern_count,
+            short_signatures,
+            grep,
+            signatures,
+            extractor_lookup_table,
+            no_mmap: self.no_mmap,
+            max_leading_zeros,
+            zero_run_pattern_len,
+        })
     }
 }
 
 impl Binwalk {
     /// Create a new Binwalk instance with all default values.
-    /// Equivalent to `Binwalk::builder().build()`.
+    /// Equivalent to `Binwalk::builder().build().unwrap()`.
     ///
     /// ## Example
     ///
@@ -296,7 +347,10 @@ impl Binwalk {
     /// let binwalker = Binwalk::new();
     /// ```
     pub fn new() -> Self {
-        Self::builder().build()
+        // The internal signature patterns are compiled in, so this cannot fail at runtime
+        Self::builder()
+            .build()
+            .expect("the internal signature patterns must be valid")
     }
 
     /// Create a [`BinwalkBuilder`], to configure a Binwalk instance.
@@ -306,7 +360,7 @@ impl Binwalk {
     /// ```
     /// use binwalk_ng::Binwalk;
     ///
-    /// let binwalker = Binwalk::builder().exclude("jpeg").build();
+    /// let binwalker = Binwalk::builder().exclude("jpeg").build().unwrap();
     /// ```
     pub fn builder() -> BinwalkBuilder {
         BinwalkBuilder::default()
@@ -325,6 +379,13 @@ impl Binwalk {
     /// If the mmap call is allowed to be used for reading files
     pub const fn allow_mmap(&self) -> bool {
         !self.no_mmap
+    }
+
+    /// Index in [`Binwalk::grep`] of the synthetic all-zero pattern, or `None` if there is none to
+    /// match
+    fn zero_run_pattern_index(&self) -> Option<usize> {
+        self.zero_run_pattern_len
+            .map(|_| self.grep.patterns_len() - 1)
     }
 
     /// Where to resume scanning after the synthetic all-zero pattern matched, between
@@ -441,21 +502,7 @@ impl Binwalk {
             }
         }
 
-        /*
-         * Same pattern matching algorithm used by fgrep.
-         * This will search for all magic byte patterns in the file data, all at once.
-         * https://en.wikipedia.org/wiki/Aho–Corasick_algorithm
-         */
-        // Searched alongside the real patterns to spot runs of zero bytes that can be skipped
-        // past. The length is only zero when there are no real patterns to search for at all, and
-        // an empty pattern would match at every offset.
-        let zero_run_pattern = self
-            .zero_run_pattern_len
-            .filter(|&len| len > 0)
-            .map(|len| vec![0u8; len]);
-        let zero_run_pattern_index = self.patterns.len();
-
-        let grep = AhoCorasick::new(self.patterns.iter().chain(&zero_run_pattern)).unwrap();
+        let zero_run_pattern_index = self.zero_run_pattern_index();
 
         debug!("Running Aho-Corasick scan");
 
@@ -481,7 +528,10 @@ impl Binwalk {
              *     be updated to point the end of the valid signature data, causing a new AhoCorasick
              *     scan to start at the new next_valid_offset file location.
              */
-            for magic_match in grep.find_overlapping_iter(&file_data[next_valid_offset..]) {
+            for magic_match in self
+                .grep
+                .find_overlapping_iter(&file_data[next_valid_offset..])
+            {
                 // Get the location of the magic bytes inside the file data
                 let magic_offset: usize = next_valid_offset + magic_match.start();
 
@@ -492,7 +542,7 @@ impl Binwalk {
                 // overlaps it has either been reported already or starts at or after the offset
                 // the scan resumes from, so abandoning this search loses nothing; see
                 // Binwalk::zero_run_pattern_len.
-                if magic_pattern_index == zero_run_pattern_index {
+                if Some(magic_pattern_index) == zero_run_pattern_index {
                     let zeros_end = next_valid_offset + magic_match.end();
                     next_valid_offset =
                         self.resume_offset_after_zero_run(file_data, magic_offset, zeros_end);
@@ -1007,11 +1057,18 @@ mod tests {
             .zero_run_pattern_len
             .expect("the default signatures should allow skipping runs of zeros");
 
-        for pattern in &binwalker.patterns {
-            assert!(
-                zero_run_pattern_len > longest_zero_run(pattern),
-                "{pattern:02X?} could hide a match across a run of zeros"
-            );
+        // The patterns are not kept around after the automaton is built, so re-derive the ones a
+        // default Binwalk searches for: every magic of every non-short signature.
+        for signature in magic::patterns() {
+            if signature.short {
+                continue;
+            }
+            for pattern in &signature.magic {
+                assert!(
+                    zero_run_pattern_len > longest_zero_run(pattern),
+                    "{pattern:02X?} could hide a match across a run of zeros"
+                );
+            }
         }
         // Which also means it is longer than any pattern's leading zeros, so a skip always moves
         // the scan forwards.
@@ -1064,8 +1121,9 @@ mod tests {
         let binwalker = Binwalk::builder()
             .include(String::new())
             .full_search(true)
-            .build();
-        assert!(binwalker.patterns.is_empty());
+            .build()
+            .unwrap();
+        assert_eq!(binwalker.grep.patterns_len(), 0);
 
         assert!(binwalker.scan(&[0, 1, 0, 1, 0, 1, 0, 1]).is_empty());
     }
@@ -1112,7 +1170,7 @@ mod tests {
         file_data.extend_from_slice(&magic);
         file_data.extend_from_slice(&[0xFF; 16]);
 
-        let binwalker = Binwalk::builder().signature(signature).build();
+        let binwalker = Binwalk::builder().signature(signature).build().unwrap();
         let file_map = binwalker.scan(&file_data);
 
         assert!(
