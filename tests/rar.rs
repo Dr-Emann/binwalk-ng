@@ -18,8 +18,7 @@ fn integration_test() {
 
 fn run_rar_binwalk(input: &str, output_dir: &Path) -> binwalk_ng::AnalysisResults {
     let path = Path::new("tests").join("inputs").join(input);
-    let binwalker = Binwalk::configure(vec!["rar".to_string()], vec![], None, false)
-        .expect("Binwalk initialization failed");
+    let binwalker = Binwalk::builder().include("rar").build();
     binwalker.analyze(&path, Some(output_dir))
 }
 
