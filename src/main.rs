@@ -127,14 +127,19 @@ fn main() -> ExitCode {
     };
 
     // Initialize binwalk
-    let binwalker = Arc::new(
-        binwalk_ng::Binwalk::builder()
-            .includes(cli_args.include)
-            .excludes(cli_args.exclude)
-            .full_search(cli_args.search_all)
-            .no_mmap(cli_args.no_mmap)
-            .build(),
-    );
+    let binwalker = match binwalk_ng::Binwalk::builder()
+        .includes(cli_args.include)
+        .excludes(cli_args.exclude)
+        .full_search(cli_args.search_all)
+        .no_mmap(cli_args.no_mmap)
+        .build()
+    {
+        Ok(binwalker) => Arc::new(binwalker),
+        Err(e) => {
+            error!("Binwalk initialization failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // If the user specified --threads, honor that request; else, auto-detect available parallelism
     let available_workers = cli_args.threads.map(|t| t as usize).unwrap_or_else(|| {

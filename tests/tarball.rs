@@ -39,7 +39,10 @@ fn extraction_produces_expected_files() {
     let output_directory = tempfile::tempdir().unwrap();
     let input_path = Path::new("tests").join("inputs").join("tarball.bin");
 
-    let binwalker = Binwalk::builder().include("tarball").build();
+    let binwalker = Binwalk::builder()
+        .include("tarball")
+        .build()
+        .expect("Binwalk initialization failed");
 
     let results = binwalker.analyze(&input_path, Some(output_directory.path()));
 
