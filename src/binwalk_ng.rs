@@ -345,16 +345,17 @@ impl Binwalk {
         };
         debug_assert!(first_possible_all_zero_match.is_none_or(|idx| idx >= magic_offset));
 
-        let search_end = match first_possible_all_zero_match {
-            // If there is a possible all-zero match, we only need to see if there's a non-zero
-            // byte shortly after that could cause a pattern with leading zeros to match first
-            Some(idx) => idx
-                .saturating_add(self.max_leading_zeros)
-                .min(file_data.len()),
+        let search_end = first_possible_all_zero_match.map_or(
             // If there is no possible all-zero match, we want to find the first place anywhere
             // a pattern with leading zeros could match.
-            None => file_data.len(),
-        };
+            file_data.len(),
+            // If there is a possible all-zero match, we only need to see if there's a non-zero
+            // byte shortly after that could cause a pattern with leading zeros to match first
+            |idx| {
+                idx.saturating_add(self.max_leading_zeros)
+                    .min(file_data.len())
+            },
+        );
         // `search_end` may fall inside the known zeros (a backwards range) when the all-zero
         // candidate is closer than `known_zero_size - max_leading_zeros`; `get` then yields `None`
         // and there is nothing to search.
