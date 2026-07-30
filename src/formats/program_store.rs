@@ -546,4 +546,20 @@ mod tests {
         fix_hcs(&mut data);
         assert!(parse_program_store_header(&data).is_err());
     }
+
+    // The scan loop's zero-run pattern is long enough to clear NONZERO_BEFORE_MAGIC, which only
+    // bounds where a valid header can begin inside a run of zeros while a zero byte there fails
+    // to parse. Relaxing that would let valid images be skipped over.
+    #[test]
+    fn nonzero_before_magic_is_required_by_parser() {
+        for fixture in [VALID, VALID_SPLIT] {
+            let mut data = fixture.to_vec();
+            data[MAGIC_OFFSET - NONZERO_BEFORE_MAGIC] = 0;
+            fix_hcs(&mut data);
+            assert!(
+                parse_program_store_header(&data).is_err(),
+                "a header with a zero byte NONZERO_BEFORE_MAGIC back from the magic must not parse"
+            );
+        }
+    }
 }
