@@ -193,7 +193,7 @@ pub fn parse_arj_header(arj_data: &[u8]) -> Result<ARJHeader, StructureError> {
 
     // Filename starts at first_hdr_size within the header data block
     let original_name = arj_data
-        .get(HDR_DATA_OFFSET + first_hdr_size..)
+        .get(HDR_DATA_OFFSET + first_hdr_size..crc_start)
         .map_or_else(|| "".to_string(), get_cstring);
 
     Ok(ARJHeader {
