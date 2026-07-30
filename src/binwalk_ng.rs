@@ -90,26 +90,36 @@ pub struct Binwalk {
     /// A pattern match can begin at most this many bytes before the pattern's first non-zero
     /// byte, which bounds how far a scan may skip ahead through a run of zero bytes.
     pub max_leading_zeros: usize,
-    /// How far a scan may skip ahead through a run of zero bytes
-    pub zero_run_skip: ZeroRunSkip,
+    /// What the all-zero magic patterns being searched for require of a match inside a run of zero
+    /// bytes, which bounds how far a scan may skip ahead through such a run
+    all_zero_magic_requirements: AllZeroMagicRequirements,
 }
 
-/// What an all-zero magic pattern costs a scan that wants to skip over a run of zero bytes
+/// What the all-zero magic patterns being searched for require of a match inside a run of zero
+/// bytes
 ///
 /// Such a pattern matches at every offset in the run, so its own bytes say nothing about where a
 /// valid signature can begin; only a byte the signature requires to be non-zero can tell one
 /// apart from the run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum ZeroRunSkip {
-    /// No all-zero magic pattern is being searched for, so nothing in the run can match
+enum AllZeroMagicRequirements {
+    /// No all-zero magic pattern is being searched for
+    ///
+    /// No offset in a run has to be checked on one's account, so only patterns with leading zeros
+    /// limit the skip.
     #[default]
-    Unrestricted,
-    /// An all-zero magic pattern is being searched for whose signature requires a non-zero byte
-    /// this far back from the match
-    Lookbehind(usize),
-    /// An all-zero magic pattern is being searched for that requires no non-zero byte, so no
-    /// offset in the run can be ruled out
-    Disabled,
+    Absent,
+    /// A single all-zero magic pattern is being searched for, whose signature requires a non-zero
+    /// byte this many bytes back from the match
+    ///
+    /// Inside a run it can therefore only match exactly this far past a non-zero byte.
+    NonZeroBefore(usize),
+    /// An all-zero magic pattern is being searched for with no single requirement to go on, so no
+    /// offset in a run can be ruled out
+    ///
+    /// Either its signature requires no non-zero byte, or it is a second all-zero pattern, whose
+    /// own requirement would have to be tracked alongside the first.
+    Unbounded,
 }
 
 impl Binwalk {
@@ -259,12 +269,16 @@ impl Binwalk {
                         // program_store's is the only all-zero magic that names such a byte. Two
                         // of them would need their earliest possible matches computed separately,
                         // so a second all-zero magic gives up on skipping either way.
-                        new_instance.zero_run_skip = if signature.name == "program_store"
-                            && new_instance.zero_run_skip != ZeroRunSkip::Disabled
+                        new_instance.all_zero_magic_requirements = if signature.name
+                            == "program_store"
+                            && new_instance.all_zero_magic_requirements
+                                != AllZeroMagicRequirements::Unbounded
                         {
-                            ZeroRunSkip::Lookbehind(program_store::NONZERO_BEFORE_MAGIC)
+                            AllZeroMagicRequirements::NonZeroBefore(
+                                program_store::NONZERO_BEFORE_MAGIC,
+                            )
                         } else {
-                            ZeroRunSkip::Disabled
+                            AllZeroMagicRequirements::Unbounded
                         };
                     }
                 }
@@ -286,50 +300,72 @@ impl Binwalk {
         Ok(new_instance)
     }
 
-    /// The number of bytes after `magic_offset` (which begins a run of zero bytes) within which no
-    /// magic pattern could begin a valid signature match, i.e. how far the scan may skip ahead.
+    /// The number of bytes after `magic_offset` (which begins a run of at least `known_zero_size`
+    /// zero bytes) within which no magic pattern could begin a valid signature match,
+    /// i.e. how far the scan may skip ahead.
     ///
     /// Returns `None` if no offset past `magic_offset` can be ruled out, i.e. nothing can be
     /// skipped.
-    fn skippable_zeros(&self, file_data: &[u8], magic_offset: usize) -> Option<NonZeroUsize> {
-        debug_assert!(file_data[magic_offset] == 0, "should be at a run of zeros");
-
-        // Within a run of zeros, only two offsets could still start a valid match, each anchored
-        // to a nonzero byte:
-        // - an all-zero magic can validate where its required nonzero lookbehind byte lines up
-        //   with the first nonzero byte behind `magic_offset`: `lookbehind` bytes past that byte;
+    fn skippable_zeros(
+        &self,
+        file_data: &[u8],
+        magic_offset: usize,
+        known_zero_size: usize,
+    ) -> Option<NonZeroUsize> {
+        debug_assert!(
+            file_data[magic_offset..][..known_zero_size]
+                .iter()
+                .all(|&b| b == 0),
+            "should be at a run of zeros"
+        );
+        // Within a run of zeros, only two offsets could still start a valid match:
+        // - an all-zero magic can match where its required nonzero byte lines up with the first
+        //   nonzero byte behind `magic_offset`: `distance` bytes past that byte;
         // - a magic with leading zeros can validate where its zeros end at the run's end:
         //   `max_leading_zeros` bytes before the first nonzero byte ahead.
         // Everything before the earlier of those two candidates may be skipped.
-        let lookbehind_match = match self.zero_run_skip {
-            ZeroRunSkip::Disabled => return None,
-            ZeroRunSkip::Unrestricted => usize::MAX,
-            ZeroRunSkip::Lookbehind(lookbehind) => {
-                let search_start = magic_offset.saturating_sub(lookbehind);
-                let lookbehind_match = file_data[search_start..magic_offset]
+        let first_possible_all_zero_match: Option<usize> = match self.all_zero_magic_requirements {
+            AllZeroMagicRequirements::Unbounded => return None,
+            AllZeroMagicRequirements::Absent => None,
+            AllZeroMagicRequirements::NonZeroBefore(distance) => {
+                let search_start = magic_offset.saturating_sub(distance);
+                file_data[search_start..magic_offset]
                     .iter()
                     .position(|&byte| byte != 0)
-                    .map_or(usize::MAX, |pos| search_start + pos + lookbehind);
-                debug_assert!(lookbehind_match >= magic_offset);
-                lookbehind_match
+                    .map(|pos| search_start + pos + distance)
             }
         };
+        debug_assert!(first_possible_all_zero_match.is_none_or(|idx| idx >= magic_offset));
 
-        // A nonzero byte more than `max_leading_zeros` bytes past `lookbehind_match` can only
-        // give a later candidate, so the search for the run's end may stop there.
-        let search_end = lookbehind_match
-            .saturating_add(self.max_leading_zeros)
-            .min(file_data.len());
-        let zeros_end = file_data[magic_offset..search_end]
+        let search_end = match first_possible_all_zero_match {
+            // If there is a possible all-zero match, we only need to see if there's a non-zero
+            // byte shortly after that could cause a pattern with leading zeros to match first
+            Some(idx) => idx
+                .saturating_add(self.max_leading_zeros)
+                .min(file_data.len()),
+            // If there is no possible all-zero match, we want to find the first place anywhere
+            // a pattern with leading zeros could match.
+            None => file_data.len(),
+        };
+        // `search_end` may fall inside the known zeros (a backwards range) when the all-zero
+        // candidate is closer than `known_zero_size - max_leading_zeros`; `get` then yields `None`
+        // and there is nothing to search.
+        let first_non_zero = file_data
+            .get(magic_offset + known_zero_size..search_end)
+            .unwrap_or_default()
             .iter()
             .position(|&byte| byte != 0)
-            .map_or(search_end, |pos| magic_offset + pos);
-        let leading_zeros_match = zeros_end.saturating_sub(self.max_leading_zeros);
+            .map(|pos| magic_offset + known_zero_size + pos);
+        let first_possible_leading_zeros_match =
+            first_non_zero.map(|idx| idx.saturating_sub(self.max_leading_zeros));
 
-        let skippable = lookbehind_match
-            .min(leading_zeros_match)
-            .saturating_sub(magic_offset);
-        NonZeroUsize::new(skippable)
+        // `or` acts as a `min` here: a leading-zeros candidate can only be found before
+        // `search_end = all_zero_candidate + max_leading_zeros`, so when both exist the
+        // leading-zeros one is always first. With neither, nothing ahead can match at all.
+        let first_possible_match = first_possible_leading_zeros_match
+            .or(first_possible_all_zero_match)
+            .unwrap_or(file_data.len());
+        NonZeroUsize::new(first_possible_match.saturating_sub(magic_offset))
     }
 
     /// Scan a file for magic signatures.
@@ -505,10 +541,12 @@ impl Binwalk {
                     // An all-zero magic matches at every offset in a run of zero bytes, and such
                     // runs are common in binary files. Rather than validate every one of those
                     // offsets, skip to the next one that could still hold a valid signature.
-                    if file_data[magic_offset..][..magic_match.len()]
+                    let all_zero_match = file_data[magic_offset..][..magic_match.len()]
                         .iter()
-                        .all(|&b| b == 0)
-                        && let Some(skippable_zeros) = self.skippable_zeros(file_data, magic_offset)
+                        .all(|&b| b == 0);
+                    if all_zero_match
+                        && let Some(skippable_zeros) =
+                            self.skippable_zeros(file_data, magic_offset, magic_match.len())
                     {
                         next_valid_offset = magic_offset + skippable_zeros.get();
                         break;
@@ -1007,29 +1045,29 @@ mod tests {
 
     #[test]
     fn skippable_zeros_wont_pass_a_possible_leading_zeros_match() {
-        const LOOKBEHIND: usize = 8;
+        const NONZERO_BEFORE: usize = 8;
         let binwalker = Binwalk {
             max_leading_zeros: 3,
-            zero_run_skip: ZeroRunSkip::Lookbehind(LOOKBEHIND),
+            all_zero_magic_requirements: AllZeroMagicRequirements::NonZeroBefore(NONZERO_BEFORE),
             ..Binwalk::default()
         };
-        let magic_offset = LOOKBEHIND;
+        let magic_offset = NONZERO_BEFORE;
 
-        // A non-zero byte 2 into the lookbehind window means an all-zero magic could validate at
+        // A non-zero byte 2 into the window means an all-zero magic could validate at
         // magic_offset + 2 at the earliest; with nothing but zeros ahead, the scan may skip
         // exactly that far.
         let mut file_data = [0; 16];
         *file_data.last_mut().unwrap() = 9;
         file_data[2] = 1;
-        //        |-----LOOKBEHIND--------|     |-----|<-max_leading_zeros
+        //        |-----NONZERO_BEFORE----|     |-----|<-max_leading_zeros
         //        v                       v     v     v
         // [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
         //                          ^     ^     ^
         //                          |     |     possible match: 3 leading zeros before a nonzero
-        //                          |     possible match: zeros, with a nonzero `LOOKBEHIND` before
+        //                          |     possible match: zeros, `NONZERO_BEFORE` past a nonzero
         //                          current magic_offset
         assert_eq!(
-            binwalker.skippable_zeros(&file_data, magic_offset),
+            binwalker.skippable_zeros(&file_data, magic_offset, 1),
             NonZeroUsize::new(2)
         );
 
@@ -1037,16 +1075,16 @@ mod tests {
         // magic_offset + 1, so the scan may only skip 1 byte.
         file_data[magic_offset + 4] = 2;
         //                             |-----|<-max_leading_zeros
-        //        |-----LOOKBEHIND-----+--|  |
+        //        |-----NONZERO_BEFORE-+--|  |
         //        v                    v  v  v
         // [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 9];
         //        ^                 ^  ^  ^
-        //        |                 |  |  possible match: zeros, with a nonzero `LOOKBEHIND` before
+        //        |                 |  |  possible match: zeros, `NONZERO_BEFORE` past a nonzero
         //        |                 |  possible match: 3 leading zeros before a nonzero
         //        |                 current magic_offset
-        //        nonzero byte `LOOKBEHIND` bytes behind next possible match
+        //        nonzero byte `NONZERO_BEFORE` bytes behind next possible match
         assert_eq!(
-            binwalker.skippable_zeros(&file_data, magic_offset),
+            binwalker.skippable_zeros(&file_data, magic_offset, 1),
             NonZeroUsize::new(1)
         );
     }
