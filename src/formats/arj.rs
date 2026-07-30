@@ -98,8 +98,7 @@ pub fn parse_arj_header(arj_data: &[u8]) -> Result<ARJHeader, StructureError> {
     let basic_hdr_size = arj_header.basic_hdr_size.get() as usize;
 
     // Minimum header data block size (excluding magic + basic_hdr_size)
-    const HDR_PREFIX_SIZE: usize = std::mem::size_of::<zerocopy::U16<LE>>() * 2;
-    const MIN_HDR_SIZE: usize = std::mem::size_of::<ARJHeaderBytes>() - HDR_PREFIX_SIZE;
+    const MIN_HDR_SIZE: usize = std::mem::size_of::<ARJHeaderBytes>() - HDR_DATA_OFFSET;
     const CRC_SIZE: usize = std::mem::size_of::<u32>();
 
     if basic_hdr_size < MIN_HDR_SIZE || HDR_DATA_OFFSET + basic_hdr_size + CRC_SIZE > arj_data.len()
