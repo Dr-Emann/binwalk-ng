@@ -14,8 +14,11 @@ const MAGIC_SIZE: usize = 8 + 1;
 
 /// Distance back from the magic to `name[0]`, which a valid header requires to be non-zero.
 ///
-/// The magic is all zeros, so this is the only thing that constrains where a valid header can
-/// begin within a run of zero bytes.
+/// The magic is all zeros, so a byte required to be non-zero is the only thing that constrains
+/// where a valid header can begin within a run of zero bytes. `name[0]` is the nearest such byte
+/// — `len` is required non-zero too, but sits further back — and the nearest one gives the
+/// tightest bound. Understating this distance would let a valid header be skipped over;
+/// overstating it only costs scanning speed.
 pub(crate) const NONZERO_BEFORE_MAGIC: usize =
     MAGIC_OFFSET - offset_of!(ProgramStoreHeaderRaw, name);
 
@@ -76,8 +79,11 @@ pub fn program_store_parser(
     Ok(result)
 }
 
+// Both constants are derived from the struct, so pin them to the layout the format specifies:
+// reshuffling the fields would otherwise move them silently, and the scan loop's zero-run skip
+// distance with them.
 const _: () = assert!(
-    MAGIC_OFFSET == offset_of!(ProgramStoreHeaderRaw, pad) - 1,
+    MAGIC_OFFSET == 67 && NONZERO_BEFORE_MAGIC == 47,
     "Magic offset must be the final null terminator for the name before the pad field",
 );
 
@@ -368,7 +374,7 @@ mod tests {
     static VALID_SPLIT: &[u8] = include_bytes!("../../tests/inputs/program_store_dual.bin");
 
     // Recompute and patch the HCS field after mutating bytes in the HCS-covered region (0..84).
-    // Only needed for tests whose check runs *after* HCS (empty filename, positive cases).
+    // Needed by any test that must reject (or accept) for a reason other than a broken HCS.
     fn fix_hcs(data: &mut [u8]) {
         let hcs = crc16_genibus(&data[..84]);
         data[84] = (hcs >> 8) as u8;
@@ -406,9 +412,12 @@ mod tests {
     fn scan_finds_image_with_zero_hcs() {
         let payload = [0u8; 8];
 
-        // `sig` is unvalidated, so it can be chosen to drive `hcs` to zero. With `len1`, `len2`
-        // and `chk` also zero, this is the longest run of zeros a valid image can have starting
-        // at its magic, which is what bounds how far the scanner may skip ahead.
+        // The worst case for the scanner: `name[0]` is the only non-zero byte before the magic, so
+        // the run of zeros containing the magic starts as early as a valid image allows, one byte
+        // past `name[0]`.
+        // `sig` can be any value, so it is chosen to drive `hcs` to zero; with `len1`, `len2` and
+        // `chk` zero too, the run extends past the header and the whole image sits inside it.
+        // Ensure the parser still finds the signature.
         let mut image = vec![0u8; HEADER_SIZE];
         let header = ProgramStoreHeaderRaw::mut_from_bytes(&mut image).unwrap();
         header.sig = [0xDB, 0x63];
@@ -545,5 +554,21 @@ mod tests {
         data[20] = 0;
         fix_hcs(&mut data);
         assert!(parse_program_store_header(&data).is_err());
+    }
+
+    // The scan loop's zero-run pattern is long enough to clear NONZERO_BEFORE_MAGIC, which only
+    // bounds where a valid header can begin inside a run of zeros while a zero byte there fails
+    // to parse. Relaxing that would let valid images be skipped over.
+    #[test]
+    fn nonzero_before_magic_is_required_by_parser() {
+        for fixture in [VALID, VALID_SPLIT] {
+            let mut data = fixture.to_vec();
+            data[MAGIC_OFFSET - NONZERO_BEFORE_MAGIC] = 0;
+            fix_hcs(&mut data);
+            assert!(
+                parse_program_store_header(&data).is_err(),
+                "a header with a zero byte NONZERO_BEFORE_MAGIC back from the magic must not parse"
+            );
+        }
     }
 }
