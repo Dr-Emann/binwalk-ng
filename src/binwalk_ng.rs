@@ -93,7 +93,7 @@ pub struct Binwalk {
     ///
     /// A pattern match can begin at most this many bytes before the pattern's first non-zero
     /// byte, which bounds how far a scan may skip ahead through a run of zero bytes.
-    pub max_leading_zeros: usize,
+    max_leading_zeros: usize,
     /// Length of the synthetic all-zero pattern that [`Binwalk::scan`] searches for in order to
     /// spot a run of zero bytes it can skip past, or `None` if no run can be skipped
     ///
@@ -116,7 +116,7 @@ pub struct Binwalk {
     zero_run_pattern_len: Option<usize>,
 }
 
-/// The longest run of consecutive zero bytes anywhere in `pattern`, leading zeros included
+/// The longest run of consecutive zero bytes anywhere in `pattern`
 fn longest_zero_run(pattern: &[u8]) -> usize {
     pattern
         .split(|&byte| byte != 0)
@@ -269,25 +269,36 @@ impl Binwalk {
 
                 // How long a run of zeros has to be for this pattern not to stand in the way of
                 // skipping it; see Binwalk::zero_run_pattern_len.
-                let required_zero_run = match pattern.iter().position(|&b| b != 0) {
+                let longest_matching_zeros = match pattern.iter().position(|&b| b != 0) {
                     Some(leading_zeros) => {
                         new_instance.max_leading_zeros =
                             new_instance.max_leading_zeros.max(leading_zeros);
                         Some(longest_zero_run(pattern))
                     }
                     // An all-zero magic says nothing about where a valid signature can begin,
-                    // since it matches at every offset in a run of zeros. program_store's is the
-                    // only one that names a byte its signature requires to be non-zero; nothing is
-                    // known about any other, so no run of zeros could be skipped.
+                    // since it matches at every offset in a run of zeros. However, we know
+                    // something about program_store (the only built-in signature with all zero
+                    // magic): We know that there must be a nonzero byte `NONZERO_BEFORE_MAGIC`
+                    // bytes before its pattern. Therefore, we know a run of zeros larger than that
+                    // could never match it.
                     None if signature.name == "program_store" => {
                         Some(pattern.len() + program_store::NONZERO_BEFORE_MAGIC)
                     }
-                    None => None,
+                    // If a user-provided Signature specifies an all-zero pattern, we have no info
+                    // on the max run of zeros which could match their pattern.
+                    None => {
+                        warn!(
+                            "pattern for {} contains only zeros, this may slow down scanning",
+                            signature.name,
+                        );
+                        None
+                    }
                 };
-                new_instance.zero_run_pattern_len = new_instance
-                    .zero_run_pattern_len
-                    .zip(required_zero_run)
-                    .map(|(len, required)| len.max(required + 1));
+                new_instance.zero_run_pattern_len =
+                    match (new_instance.zero_run_pattern_len, longest_matching_zeros) {
+                        (Some(len), Some(matchable_zeros)) => Some(len.max(matchable_zeros + 1)),
+                        _ => None,
+                    };
 
                 /*
                  * Need to keep a mapping of the pattern index and its associated signature
@@ -306,7 +317,8 @@ impl Binwalk {
         Ok(new_instance)
     }
 
-    /// Where to resume scanning after the synthetic all-zero pattern matched, ending at `zeros_end`
+    /// Where to resume scanning after the synthetic all-zero pattern matched, between
+    /// `synth_zeros_start` and `synth_zeros_end`
     ///
     /// A magic pattern can begin at most `max_leading_zeros` bytes before its first non-zero byte,
     /// so nothing between here and that far ahead of the next non-zero byte could begin a match.
@@ -314,12 +326,28 @@ impl Binwalk {
     /// The result is always past the start of the matched zeros, and so past the offset the
     /// current search began at: the synthetic pattern is longer than `max_leading_zeros`, since
     /// every pattern with leading zeros also has a non-zero byte after them.
-    fn resume_offset_after_zero_run(&self, file_data: &[u8], zeros_end: usize) -> usize {
-        let next_non_zero = file_data[zeros_end..]
+    fn resume_offset_after_zero_run(
+        &self,
+        file_data: &[u8],
+        synth_zeros_start: usize,
+        synth_zeros_end: usize,
+    ) -> usize {
+        debug_assert!(
+            file_data[synth_zeros_start..synth_zeros_end]
+                .iter()
+                .all(|&b| b == 0)
+        );
+        debug_assert!(synth_zeros_end - synth_zeros_start > self.max_leading_zeros);
+        let Some(next_non_zero) = file_data[synth_zeros_end..]
             .iter()
             .position(|&byte| byte != 0)
-            .map_or(file_data.len(), |pos| zeros_end + pos);
-        next_non_zero.saturating_sub(self.max_leading_zeros)
+        else {
+            // Every pattern needs a non-zero byte, either in the pattern itself or, for an
+            // all-zero magic, in the data its signature requires to be non-zero nearby. With none
+            // left in the file, nothing can match from here on.
+            return file_data.len();
+        };
+        synth_zeros_end + next_non_zero - self.max_leading_zeros
     }
 
     /// Scan a file for magic signatures.
@@ -452,8 +480,11 @@ impl Binwalk {
                 // overlaps it has already been reported, so abandoning this search loses nothing.
                 if magic_pattern_index == zero_run_pattern_index {
                     let zeros_end = next_valid_offset + magic_match.end();
-                    next_valid_offset = self.resume_offset_after_zero_run(file_data, zeros_end);
-                    debug!("Skipping run of zero bytes ending at {zeros_end:#X}");
+                    next_valid_offset =
+                        self.resume_offset_after_zero_run(file_data, magic_offset, zeros_end);
+                    debug!(
+                        "Skipping run of zero bytes, jumping from {zeros_end:#X} to {next_valid_offset:#X}"
+                    );
                     break;
                 }
 
@@ -1044,18 +1075,33 @@ mod tests {
         // A pattern with 3 leading zeros could begin 3 bytes before the 9, so the scan may resume
         // no later than that, even though the zeros are known to continue until then.
         let mut file_data = [0; 16];
-        *file_data.last_mut().unwrap() = 9;
-        //  |--zeros known to the caller--|  |---|<-max_leading_zeros
-        //  v                             v  v   v
-        // [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]
-        //                                   ^
-        //                                   possible match: 3 leading zeros before a non-zero
-        assert_eq!(binwalker.resume_offset_after_zero_run(&file_data, 11), 12);
+        // With nothing but zeros ahead there is nothing left to match, so the scan is finished.
+        assert_eq!(
+            binwalker.resume_offset_after_zero_run(&file_data, 0, 11),
+            file_data.len()
+        );
 
-        // With nothing but zeros ahead there is nothing left to match, but the scan still may not
-        // resume past where a pattern with leading zeros could start at the very end of the file.
-        file_data[15] = 0;
-        assert_eq!(binwalker.resume_offset_after_zero_run(&file_data, 11), 13);
+        *file_data.last_mut().unwrap() = 9;
+        //  |--zeros known to the caller--|     |-----|<-max_leading_zeros
+        //  v                             v     v     v
+        // [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]
+        //                                      ^
+        //                                      possible match: 3 leading zeros before a non-zero
+        assert_eq!(
+            binwalker.resume_offset_after_zero_run(&file_data, 0, 11),
+            12
+        );
+        file_data[13] = 2;
+        //  |--zeros known to the caller--|
+        //  |                          |--+--|<-max_leading_zeros
+        //  v                          v  v  v
+        // [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 9]
+        //                             ^
+        //                             possible match: 3 leading zeros before a non-zero
+        assert_eq!(
+            binwalker.resume_offset_after_zero_run(&file_data, 0, 11),
+            10
+        );
     }
 
     #[test]
