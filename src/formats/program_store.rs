@@ -397,27 +397,61 @@ mod tests {
         (data, offset)
     }
 
-    #[test]
-    fn scan_finds_image_after_zero_region() {
-        let (data, offset) = embed_in_zeros(VALID);
-        let file_map = Binwalk::new().scan(&data);
-        assert!(
-            file_map
-                .iter()
-                .any(|r| r.name == "program_store" && r.offset == offset)
-        );
+    // The two configurations a scan test has to cover.
+    //
+    // The zero-run skip rewinds by the most leading zeros any pattern has, and this signature is
+    // the only built-in one whose magic is all zeros, hence the only one contributing no leading
+    // zeros of its own. Filtering the others away drops that rewind to nothing, so it is the
+    // configuration in which the skip is least conservative, and the one an all-zero magic has to
+    // hold up under on the strength of NONZERO_BEFORE_MAGIC alone.
+    fn scanners() -> [(&'static str, Binwalk); 2] {
+        [
+            ("all signatures", Binwalk::new()),
+            (
+                "program_store only",
+                Binwalk::configure(
+                    None,
+                    None,
+                    vec!["program_store".to_string()],
+                    vec![],
+                    None,
+                    false,
+                )
+                .unwrap(),
+            ),
+        ]
+    }
+
+    fn assert_found_at(data: &[u8], offset: usize) {
+        for (config, binwalker) in scanners() {
+            let file_map = binwalker.scan(data);
+            assert!(
+                file_map
+                    .iter()
+                    .any(|r| r.name == "program_store" && r.offset == offset),
+                "not found at {offset:#X} with {config}: {file_map:?}"
+            );
+        }
     }
 
     #[test]
-    fn scan_finds_image_with_zero_hcs() {
+    fn scan_finds_image_after_zero_region() {
+        let (data, offset) = embed_in_zeros(VALID);
+        assert_found_at(&data, offset);
+    }
+
+    // The worst case for the scanner: `name[0]` is the only non-zero byte before the magic, so the
+    // run of zeros containing the magic starts as early as a valid image allows, one byte past
+    // `name[0]`, i.e. NONZERO_BEFORE_MAGIC - 1 bytes ahead of it.
+    //
+    // `sig` can be any value, so it is chosen to drive `hcs` to zero; with `len1`, `len2` and `chk`
+    // zero too, the run extends past the header and the whole image sits inside it. Note the run
+    // trailing off past the magic is not what the scan has to survive here: matches are reported in
+    // the order they end, so only the zeros between the earliest start of a skippable run and the
+    // *end* of the magic can hide it.
+    fn zero_hcs_image() -> Vec<u8> {
         let payload = [0u8; 8];
 
-        // The worst case for the scanner: `name[0]` is the only non-zero byte before the magic, so
-        // the run of zeros containing the magic starts as early as a valid image allows, one byte
-        // past `name[0]`.
-        // `sig` can be any value, so it is chosen to drive `hcs` to zero; with `len1`, `len2` and
-        // `chk` zero too, the run extends past the header and the whole image sits inside it.
-        // Ensure the parser still finds the signature.
         let mut image = vec![0u8; HEADER_SIZE];
         let header = ProgramStoreHeaderRaw::mut_from_bytes(&mut image).unwrap();
         header.sig = [0xDB, 0x63];
@@ -431,14 +465,23 @@ mod tests {
             "sig value no longer drives hcs to zero"
         );
         assert!(parse_program_store_header(&image).is_ok());
+        image
+    }
 
-        let file_map = Binwalk::new().scan(&image);
-        assert!(
-            file_map
-                .iter()
-                .any(|r| r.name == "program_store" && r.offset == 0),
-            "{file_map:?}"
-        );
+    #[test]
+    fn scan_finds_image_with_zero_hcs() {
+        assert_found_at(&zero_hcs_image(), 0);
+    }
+
+    // Same image, but now behind a run of zeros long enough to be skipped, so the scan reaches it
+    // by resuming from `name[0]` rather than by starting there. The resume rewinds by the most
+    // leading zeros any pattern has, which is nothing at all when this signature is the only one
+    // included, so it lands exactly on `name[0]` and the magic is a further NONZERO_BEFORE_MAGIC
+    // bytes into the zeros that follow.
+    #[test]
+    fn scan_finds_image_with_zero_hcs_after_zero_region() {
+        let (data, offset) = embed_in_zeros(&zero_hcs_image());
+        assert_found_at(&data, offset);
     }
 
     #[test]

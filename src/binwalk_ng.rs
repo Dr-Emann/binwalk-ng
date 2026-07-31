@@ -121,6 +121,12 @@ pub struct Binwalk {
     /// offset in the run, and nothing but a byte its signature requires to be non-zero can rule
     /// one out. Making this pattern longer than any such magic plus the distance back to that byte
     /// keeps the byte inside the run, and so zero, for every match of it not reported first.
+    ///
+    /// Note that only the zeros up to the *end* of such a magic have to be covered, not the whole
+    /// run a valid match could sit in. A run trailing off past the magic — `program_store` permits
+    /// an arbitrarily long one, since the rest of its header and its payload may all be zero — is
+    /// no threat, because the match has already been reported by the time this pattern's match
+    /// ends. Bounding the run itself would be both unnecessary and, being unbounded, impossible.
     zero_run_pattern_len: Option<usize>,
 }
 
@@ -1075,6 +1081,61 @@ mod tests {
         // Which also means it is longer than any pattern's leading zeros, so a skip always moves
         // the scan forwards.
         assert!(zero_run_pattern_len > binwalker.max_leading_zeros);
+    }
+
+    /// The bound an all-zero magic needs, checked in the configuration that gives it the least
+    /// help: `program_store` alone.
+    ///
+    /// Its magic matches at every offset in a run of zeros, so the only thing separating a
+    /// candidate from the padding around it is `name[0]`, `NONZERO_BEFORE_MAGIC` bytes back. A
+    /// skippable run therefore has to be long enough that every match of the magic still pending
+    /// when it is spotted has that byte inside the run, and so zero:
+    ///
+    /// - a pending match ends after the run's first `zero_run_pattern_len` bytes, so it starts more
+    ///   than `zero_run_pattern_len - MAGIC_SIZE` bytes into the run,
+    /// - which puts `name[0]` at or after the run's start once that exceeds
+    ///   `NONZERO_BEFORE_MAGIC - 1`.
+    ///
+    /// Note the bound counts only as far as the *end* of the magic. Zeros trailing off past it —
+    /// `pad`, `len1`, `len2`, `hcs`, `chk` and an all-zero payload may all be zero, so the run can
+    /// be arbitrarily long — do not need covering, because matches are reported in the order they
+    /// end and this one has already been reported by then.
+    #[test]
+    fn zero_run_pattern_clears_the_all_zero_magic_on_its_own() {
+        use crate::formats::program_store::NONZERO_BEFORE_MAGIC;
+
+        let binwalker = Binwalk::configure(
+            None,
+            None,
+            vec!["program_store".to_string()],
+            vec![],
+            None,
+            /* full_search */ false,
+        )
+        .unwrap();
+        assert_eq!(
+            binwalker.patterns.len(),
+            1,
+            "expected exactly one program_store pattern: {:02X?}",
+            binwalker.patterns
+        );
+        let magic = &binwalker.patterns[0];
+        assert!(magic.iter().all(|&b| b == 0));
+
+        let zero_run_pattern_len = binwalker
+            .zero_run_pattern_len
+            .expect("an all-zero magic with a known non-zero byte still allows skipping");
+        assert!(
+            zero_run_pattern_len - magic.len() >= NONZERO_BEFORE_MAGIC,
+            "a run of {zero_run_pattern_len} zeros could hide a valid header \
+             whose non-zero byte sits {NONZERO_BEFORE_MAGIC} bytes before the magic"
+        );
+
+        // The rewind that saves a pattern with leading zeros is no help here: this magic has none,
+        // so nothing is rewound. It does not need to be — the byte that makes the magic a valid
+        // header is *behind* it, so a resume that stops at that byte still leaves the whole magic
+        // ahead of the scan.
+        assert_eq!(binwalker.max_leading_zeros, 0);
     }
 
     #[test]
