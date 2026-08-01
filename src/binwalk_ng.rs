@@ -80,8 +80,8 @@ pub struct Binwalk {
     pub short_signatures: Vec<signatures::Signature>,
     /// A list of magic bytes to search for throughout the entire file
     pub patterns: Vec<Vec<u8>>,
-    /// Maps patterns to their corresponding signature
-    pub pattern_signature_table: HashMap<usize, signatures::Signature>,
+    /// Signatures, with same indices as patterns
+    pub signatures: Vec<signatures::Signature>,
     /// Maps signatures to their corresponding extractors
     pub extractor_lookup_table: HashMap<String, Option<extractors::Extractor>>,
     /// If the mmap call is allowed to be used for reading files
@@ -308,14 +308,7 @@ impl Binwalk {
                         _ => None,
                     };
 
-                /*
-                 * Need to keep a mapping of the pattern index and its associated signature
-                 * so that when a match is found it can be resolved back to the signature from
-                 * which it came.
-                 */
-                new_instance
-                    .pattern_signature_table
-                    .insert(new_instance.patterns.len(), signature.clone());
+                new_instance.signatures.push(signature.clone());
 
                 // Add these magic bytes to the list of patterns
                 new_instance.patterns.push(pattern.to_vec());
@@ -501,10 +494,7 @@ impl Binwalk {
                 }
 
                 // Get the signature associated with this magic signature
-                let signature: &signatures::Signature = self
-                    .pattern_signature_table
-                    .get(&magic_pattern_index)
-                    .unwrap();
+                let signature = &self.signatures[magic_pattern_index];
 
                 debug!(
                     "Found {} magic match at offset {:#X}",
