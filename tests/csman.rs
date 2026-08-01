@@ -26,8 +26,7 @@ fn decompression_bomb_test() {
         .join("csman_decompression_bomb.bin");
     let file_data = std::fs::read(&file_path).expect("failed to read decompression bomb fixture");
 
-    let binwalker = Binwalk::configure(None, None, vec!["csman".to_string()], vec![], None, false)
-        .expect("Binwalk initialization failed");
+    let binwalker = Binwalk::builder().include("csman").build();
 
     let results = binwalker.scan(&file_data);
 
