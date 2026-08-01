@@ -74,10 +74,14 @@ def main() -> None:
     warnings = []
     regressed = False
 
-    for name in rs:
+    for name in sorted(set(rs) | set(bs)):
+        if name not in rs:
+            regressed = True
+            warnings.append(f"{name}: missing from new results")
+            continue
         r = rs[name]
         b = bs.get(name)
-        row = {"scenario": name}
+        row = {"scenario": name, "regressed": False}
         for field, thresh, key in (
             ("wall_ms", args.time_threshold, "wall"),
             ("cpu_ms", args.cpu_threshold, "cpu"),
@@ -91,6 +95,7 @@ def main() -> None:
             row[key] = cell
             if d is not None and d > thresh:
                 regressed = True
+                row["regressed"] = True
                 warnings.append(f"{name} {key}: +{d}%")
 
         bmem = (b or {}).get("mem") or {}
@@ -114,6 +119,7 @@ def main() -> None:
                 metrics[field] = {"base": bv, "new": nv, "delta_pct": d}
                 if d is not None and d > args.mem_threshold:
                     regressed = True
+                    row["regressed"] = True
                     warnings.append(f"{name} {src}.{field}: +{d}%")
             if metrics:
                 mems[src] = metrics
@@ -125,17 +131,7 @@ def main() -> None:
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
-        bad = any(
-            row[k]["delta_pct"] is not None and row[k]["delta_pct"] > thresh
-            for k, thresh in (
-                ("wall", args.time_threshold),
-                ("cpu", args.cpu_threshold),
-            )
-        ) or any(
-            m["delta_pct"] is not None and m["delta_pct"] > args.mem_threshold
-            for src in row["mems"].values()
-            for m in src.values()
-        )
+        bad = row["regressed"]
         md.append(
             f"| {row['scenario']} "
             f"| {fmt_wall(row['wall'])} "

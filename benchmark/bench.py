@@ -75,10 +75,13 @@ def build_binwalk() -> Path:
 
 
 def pin_cpuset() -> None:
+    available = sorted(os.sched_getaffinity(0))[:JOBS]
+    if not available:
+        raise SystemExit("ERROR: no CPUs available for pinning")
     try:
-        os.sched_setaffinity(0, range(JOBS))
+        os.sched_setaffinity(0, available)
     except OSError as exc:
-        raise SystemExit(f"ERROR: cannot pin to CPUs 0-{JOBS - 1}: {exc}")
+        raise SystemExit(f"ERROR: cannot pin to CPUs {available}: {exc}") from exc
 
 
 def wall_ms_of(
@@ -159,7 +162,7 @@ def valgrind_of(
         )
     if r.returncode != 0:
         raise RuntimeError(f"ERROR: valgrind ({kind}) failed for {name} (see {log})")
-    if re.search(r"\bERROR binwalk\b", log.read_text()):
+    if re.search(r"\bERROR binwalk_ng\b", log.read_text()):
         raise RuntimeError(
             f"ERROR: binwalk reported an error under valgrind for {name} (see {log})"
         )
@@ -175,33 +178,44 @@ def massif_of(name: str, cmd: list[str]) -> dict[str, int]:
 
 
 def dhat_of(name: str, cmd: list[str]) -> dict[str, int]:
-    _, log = valgrind_of(name, "dhat", ["--tool=dhat"], "--dhat-out-file", cmd)
-    text = log.read_text()
-    peak = DHAT_PEAK.search(text)
-    total = DHAT_TOTAL.search(text)
-    if peak is None or total is None:
-        raise RuntimeError(f"ERROR: failed to parse dhat output from {log}")
+    out, log = valgrind_of(name, "dhat", ["--tool=dhat"], "--dhat-out-file", cmd)
+    try:
+        data = json.loads(out.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    peak = data.get("t-gmax", data.get("t_gmax"))
+    total = data.get("tot-bytes", data.get("tot_bytes"))
+    blocks = data.get("tot-blocks", data.get("tot_blocks"))
+    if peak is None or total is None or blocks is None:
+        text = log.read_text()
+        peak_m = DHAT_PEAK.search(text)
+        total_m = DHAT_TOTAL.search(text)
+        if peak_m is None or total_m is None:
+            raise RuntimeError(f"ERROR: failed to parse dhat output from {log}")
+        peak = peak_m.group(1).replace(",", "")
+        total = total_m.group(1).replace(",", "")
+        blocks = total_m.group(2).replace(",", "")
     return {
-        "peak_heap_bytes": int(peak.group(1).replace(",", "")),
-        "total_alloc_bytes": int(total.group(1).replace(",", "")),
-        "alloc_count": int(total.group(2).replace(",", "")),
+        "peak_heap_bytes": int(peak),
+        "total_alloc_bytes": int(total),
+        "alloc_count": int(blocks),
     }
 
 
 def gen_workload() -> None:
     corpus = Path(WORKDIR) / "corpus.bin"
-    corpus.write_bytes(
-        b"".join(
-            sorted(p.read_bytes() for p in Path(CORPUS_DIR).iterdir() if p.is_file())
-        )
+    corpus_data = b"".join(
+        sorted(p.read_bytes() for p in Path(CORPUS_DIR).iterdir() if p.is_file())
     )
+    if not corpus_data:
+        raise SystemExit(f"ERROR: no input files found in CORPUS_DIR '{CORPUS_DIR}'")
+    corpus.write_bytes(corpus_data)
     size = LARGE_MB * 1024 * 1024
     if size < 16 * 1024 * 1024:
         raise SystemExit("ERROR: LARGE_MB too small (need >= 16)")
     large = Path(WORKDIR) / "large.bin"
     if not large.exists() or large.stat().st_size != size:
-        data = corpus.read_bytes()
-        large.write_bytes((data * (size // len(data) + 1))[:size])
+        large.write_bytes((corpus_data * (size // len(corpus_data) + 1))[:size])
 
 
 def run_benchmarks() -> None:
@@ -350,6 +364,7 @@ def main() -> None:
     )
     args = ap.parse_args()
     Path(WORKDIR).mkdir(parents=True, exist_ok=True)
+    Path(RESULTS_JSON).parent.mkdir(parents=True, exist_ok=True)
     if args.compare:
         compare()
     else:

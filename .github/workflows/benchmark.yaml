@@ -12,8 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   BENCH_IMAGE: 'binwalk-ng:benchmark'
@@ -22,9 +21,14 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Code checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -65,8 +69,23 @@ jobs:
             benchmark/workdir/dhat-*.log
           if-no-files-found: ignore
 
-      - name: Update baseline (main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  update-baseline:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v7
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results
+
+      - name: Update baseline
         run: |
           git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline || true
           if git rev-parse -q --verify origin/benchmark-baseline >/dev/null \
@@ -85,27 +104,52 @@ jobs:
             git push -q origin "$commit:refs/heads/benchmark-baseline"
           fi
 
+  report:
+    if: github.event_name == 'pull_request'
+    needs: benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results
+
       - name: Compare against baseline (PR)
-        id: compare
-        if: github.event_name == 'pull_request'
         env:
+          THRESH_TIME_PCT: 20
+          THRESH_CPU_PCT: 20
+          THRESH_MEM_PCT: 5
           COMPARE_JSON: benchmark/workdir/compare.json
         run: |
+          set -o pipefail
+          mkdir -p benchmark/workdir
           git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline || true
           if git rev-parse -q --verify origin/benchmark-baseline >/dev/null; then
             git show origin/benchmark-baseline:baseline.json > benchmark/baseline.json
-            docker run --rm \
-              -v "$PWD:/tmp/binwalk" \
-              -w /tmp/binwalk \
-              -e COMPARE_JSON \
-              "${{ env.BENCH_IMAGE }}" \
-              benchmark/bench.py --compare
+            echo '## Benchmark results' >> "$GITHUB_STEP_SUMMARY"
+            python3 benchmark/compare.py \
+              --results benchmark/results.json \
+              --baseline benchmark/baseline.json \
+              --time-threshold "$THRESH_TIME_PCT" \
+              --cpu-threshold "$THRESH_CPU_PCT" \
+              --mem-threshold "$THRESH_MEM_PCT" \
+              --compare-json "$COMPARE_JSON" \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
           else
             echo 'No benchmark baseline found yet; skipping comparison'
           fi
 
       - name: Comment results on PR
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('benchmark/workdir/compare.json') != ''
+        if: github.event.pull_request.head.repo.full_name == github.repository && hashFiles('benchmark/workdir/compare.json') != ''
         uses: actions/github-script@v7
         with:
           script: |
@@ -117,6 +161,9 @@ jobs:
             if (verdict.base_sha) body += `_vs baseline from \`${verdict.base_sha}\`_\n\n`;
             body += verdict.md + '\n';
             if (verdict.regressed) body += '\n**Regressions detected**\n';
+            if (verdict.warnings && verdict.warnings.length) {
+              body += verdict.warnings.map(w => `- ${w}`).join('\n') + '\n';
+            }
             const comments = await github.rest.issues.listComments({ owner, repo, issue_number: number });
             const existing = comments.data.find(c => c.body && c.body.includes(marker));
             if (existing) {
@@ -126,7 +173,7 @@ jobs:
             }
 
       - name: Fail on regressions
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('benchmark/workdir/compare.json') != ''
+        if: github.event.pull_request.head.repo.full_name == github.repository && hashFiles('benchmark/workdir/compare.json') != ''
         run: |
           if jq -e '.regressed' benchmark/workdir/compare.json >/dev/null 2>&1; then
             echo 'Benchmark regressions detected:'

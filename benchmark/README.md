@@ -5,12 +5,13 @@ stack), designed so numbers stay comparable across different CI CPU hardware.
 
 ## What is measured
 
-Four scenarios, all scanning a single file with the release binary (`-q`):
+Four scenarios: three scan a single file with the release binary (`-q`), and
+`list_signatures` lists signatures without scanning a file:
 
 | scenario | workload |
 |---|---|
 | `scan_corpus` | `tests/inputs/*` concatenated (~6.6 MB) |
-| `extract_corpus` | `-Me` (extract + matryoshka recursion) on `scan_corpus`' file, into a fresh `extractions/` dir per run |
+| `extract_corpus` | `-Me` (extract + matryoshka recursion) on `scan_corpus`' file, into a fresh `benchmark/workdir/extract-corpus/` dir per run |
 | `list_signatures` | `-L` (list signatures/extractors, no file scan) |
 | `scan_large` | `tests/inputs/*` content repeated to 128 MB (`LARGE_MB`) |
 
@@ -68,7 +69,8 @@ Useful env vars (pass with `-e`): `RUNS`, `WARMUP`, `CPU_REPS`, `LARGE_MB`,
   rebuilds only, BuildKit doesn't persist them to the GHA cache), then runs the
   harness inside the image with the repo mounted at `/tmp/binwalk`.
 - On PRs: posts/updates a results table as a comment and **fails the job** if any
-  metric exceeds its threshold. PRs from forks get the comparison but no comment.
+  metric exceeds its threshold. Fork PRs get the comparison in the job summary
+  but no comment (the bot token is read-only there).
 - On pushes to `main` (not PRs or manual runs): the results are pushed to the
   dedicated `benchmark-baseline` branch (root file `baseline.json`), but only
   when the metrics actually changed (`date`/`git_sha` are ignored). The bot
