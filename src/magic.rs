@@ -1267,3 +1267,55 @@ pub fn patterns() -> Vec<signatures::Signature> {
 
     binary_signatures
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every signature parser is handed the offset its magic matched at, wherever in the file that
+    /// happens to be. A magic that sits some way into its header therefore arrives at offsets with
+    /// no room for the header in front of it, and a parser that subtracts its way back to the
+    /// header start underflows there.
+    ///
+    /// This has now been the cause of six separate crashes across cramfs, jboot, ext, tarball,
+    /// dpapi and dmg, so it is worth checking the whole signature table rather than the format
+    /// that happened to be reported.
+    #[test]
+    fn no_parser_panics_on_a_magic_match_at_any_offset() {
+        // Past the largest offset any magic sits at within its own header
+        const MAX_PLACEMENT: usize = 72;
+        const TRAILING_BYTES: usize = 2048;
+
+        let mut broken: Vec<String> = Vec::new();
+
+        for signature in &patterns() {
+            for magic in &signature.magic {
+                for placement in 0..MAX_PLACEMENT {
+                    // Length and offset fields read out of the filler decide how far a parser
+                    // walks, so vary it: all zeros and all ones are the extremes of that
+                    for filler in [0x00u8, 0xFF, 0x41] {
+                        let mut data = vec![filler; placement];
+                        data.extend_from_slice(magic);
+                        data.resize(data.len() + TRAILING_BYTES, filler);
+
+                        let parser = signature.parser;
+                        if std::panic::catch_unwind(|| parser(&data, placement)).is_err() {
+                            broken.push(format!(
+                                "{} at offset {placement}, filler {filler:#04X}",
+                                signature.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        broken.sort();
+        broken.dedup();
+        assert!(
+            broken.is_empty(),
+            "signature parsers panicked instead of rejecting the match:\n{}",
+            broken.join("\n")
+        );
+    }
+}
