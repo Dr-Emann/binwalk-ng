@@ -18,8 +18,14 @@ pub fn cramfs_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult,
     const CRC_START_OFFSET: usize = 32;
     const CRC_END_OFFSET: usize = 36;
 
+    // The signature sits inside the header rather than at its start, so a match too close to the
+    // beginning of the file cannot have a header in front of it
+    let Some(header_start) = offset.checked_sub(SIGNATURE_OFFSET) else {
+        return Err(SignatureError);
+    };
+
     let mut result = SignatureResult {
-        offset: offset - SIGNATURE_OFFSET,
+        offset: header_start,
         description: DESCRIPTION.to_string(),
         confidence: CONFIDENCE_HIGH,
         ..Default::default()
