@@ -1543,6 +1543,7 @@ fn spawn(
     );
 
     // If the entirety of the source file is this one file type, no need to carve a copy of it, just create a symlink
+    let mut linked = false;
     if signature.offset == 0 && signature.size == file_data.len() {
         /*
          * Link directly to the source file, rather than via Chroot. Chroot contains the
@@ -1555,13 +1556,23 @@ fn spawn(
          * to stay absolute: the source file may live anywhere relative to the output
          * directory.
          */
-        let source_path = path::absolute(file_path)?;
-        symlink_file(&source_path, &carved_file)?;
-    } else {
-        // Copy file data to carved file path
-        if !chroot.carve_file(&carved_file, file_data, signature.offset, signature.size) {
-            return Err(std::io::Error::other("Failed to carve data to disk"));
+        match path::absolute(file_path)
+            .and_then(|source_path| symlink_file(&source_path, &carved_file))
+        {
+            Ok(()) => linked = true,
+            // Symlinks may be unavailable (unprivileged Windows, exotic file systems); a copy works just as well
+            Err(e) => warn!(
+                "Failed to link {} to {}: {}; carving a copy instead",
+                carved_file,
+                file_path.display(),
+                e
+            ),
         }
+    }
+
+    // Copy file data to carved file path if we couldn't link it
+    if !linked && !chroot.carve_file(&carved_file, file_data, signature.offset, signature.size) {
+        return Err(std::io::Error::other("Failed to carve data to disk"));
     }
 
     // Replace all "%e" command arguments with the path to the carved file
