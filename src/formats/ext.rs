@@ -28,9 +28,15 @@ pub fn ext_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
     // Offset inside the EXT image where the magic bytes reside
     const MAGIC_OFFSET: usize = 1080;
 
+    // The magic sits inside the superblock, so a match too close to the start of the file has no
+    // room for the image that should precede it
+    let Some(image_start) = offset.checked_sub(MAGIC_OFFSET) else {
+        return Err(SignatureError);
+    };
+
     let mut result = SignatureResult {
         description: DESCRIPTION.to_string(),
-        offset: offset - MAGIC_OFFSET,
+        offset: image_start,
         size: 0,
         confidence: CONFIDENCE_MEDIUM,
         ..Default::default()
