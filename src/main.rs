@@ -294,7 +294,16 @@ fn init_extraction_directory(
     }
 
     // Build a symlink path to the target file in the extraction directory
-    let link_path = extraction_directory.join(target_path.file_name().unwrap());
+    let Some(file_name) = target_path.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "'{}' does not name a file to analyze",
+                target_path.display()
+            ),
+        ));
+    };
+    let link_path = extraction_directory.join(file_name);
 
     // The target already lives in the extraction directory, so there is nothing to link
     if link_path == target_path {
