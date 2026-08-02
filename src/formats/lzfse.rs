@@ -255,20 +255,36 @@ fn lzfse_decompress(
 
     let data = &file_data[offset..];
     let mut dst_size = 0;
+    let mut found_end_of_stream = false;
     let src_size = {
         let mut remaining_data = data;
         while let Ok(lzfse_block) = parse_lzfse_block_header(remaining_data) {
             let block_size = lzfse_block.header_size + lzfse_block.data_size;
+            // A block header may claim more data than the file actually contains; consume only
+            // what is there, before dst_size is credited with the block's output
+            let Some(next_data) = remaining_data.get(block_size..) else {
+                break;
+            };
             dst_size += lzfse_block.uncompressed_size;
-            remaining_data = &remaining_data[block_size..];
+            remaining_data = next_data;
             if lzfse_block.eof {
+                found_end_of_stream = true;
                 break;
             }
             // We'll never return a header with zero size, but if we did, this would be an infinite loop
-            assert!(block_size > 0);
+            if block_size == 0 {
+                break;
+            }
         }
         data.len() - remaining_data.len()
     };
+
+    // Without an end-of-stream block the data is truncated or was never LZFSE to begin with.
+    // Decoding it anyway would report success for a zero byte result on a stream we consumed
+    // nothing of.
+    if !found_end_of_stream {
+        return exresult;
+    }
 
     // The LZFSE API can't differentiate between decompressing exactly the right amount of data and
     // truncation (see https://github.com/lzfse/lzfse/issues/5#issuecomment-237134992), so
