@@ -266,6 +266,10 @@ fn main() -> ExitCode {
 /// Returns the path to that symlink, which is the path to analyze: extraction and carving
 /// write their output relative to the analyzed file's path, so analyzing the symlink is
 /// what keeps all output inside the extraction directory.
+///
+/// A symlink left by a previous run is always replaced, so it cannot still point at some
+/// earlier target of the same name. Any other pre-existing entry is an error, rather than
+/// something to analyze in the target's place or to delete.
 fn init_extraction_directory(
     target_path: &Path,
     extraction_directory: &Path,
@@ -292,8 +296,36 @@ fn init_extraction_directory(
     // Build a symlink path to the target file in the extraction directory
     let link_path = extraction_directory.join(target_path.file_name().unwrap());
 
-    if link_path.exists() {
+    // The target already lives in the extraction directory, so there is nothing to link
+    if link_path == target_path {
         return Ok(link_path);
+    }
+
+    /*
+     * Always recreate the link, so it cannot be left over from an earlier run pointing at
+     * a different file that happened to have the same name. Only a symlink is ours to
+     * remove; anything else here belongs to the user, and neither analyzing it in the
+     * target's place nor deleting it would be right.
+     */
+    match fs::symlink_metadata(&link_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+        Ok(metadata) => {
+            if !metadata.is_symlink() {
+                error!(
+                    "'{}' already exists and was not created by binwalk, refusing to replace it",
+                    link_path.display()
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "'{}' already exists; use a different --directory",
+                        link_path.display()
+                    ),
+                ));
+            }
+            fs::remove_file(&link_path)?;
+        }
     }
 
     debug!(
