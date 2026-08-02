@@ -286,3 +286,58 @@ fn lzfse_decompress(
 
     exresult
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMPRESSEDV1_MAGIC: u32 = 0x31787662;
+    const UNCOMPRESSED_MAGIC: u32 = 0x2d787662;
+
+    /// Builds a `bvx1` block header with the two attacker controlled payload size fields set to
+    /// arbitrary values. The returned buffer is exactly `size_of::<BlockV1Header>()` bytes.
+    fn compressedv1_header(n_literal_payload_bytes: u32, n_lmd_payload_bytes: u32) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&COMPRESSEDV1_MAGIC.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_raw_bytes
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_payload_bytes
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_literals
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_matches
+        header.extend_from_slice(&n_literal_payload_bytes.to_le_bytes());
+        header.extend_from_slice(&n_lmd_payload_bytes.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // literal_bits
+        header.extend_from_slice(&0u64.to_le_bytes()); // literal_state
+        header.extend_from_slice(&0u32.to_le_bytes()); // lmd_bits
+        header.extend_from_slice(&0u16.to_le_bytes()); // l_state
+        header.extend_from_slice(&0u16.to_le_bytes()); // m_state
+        header.extend_from_slice(&0u16.to_le_bytes()); // d_state
+        assert_eq!(header.len(), std::mem::size_of::<BlockV1Header>());
+        header
+    }
+
+    #[test]
+    fn compressedv1_payload_sizes_do_not_overflow() {
+        let header = compressedv1_header(u32::MAX, u32::MAX);
+        let block = parse_lzfse_block_header(&header).expect("v1 block header should parse");
+        // The two u32 fields must be widened to usize before being summed
+        assert_eq!(block.data_size, 0x1_FFFF_FFFE);
+    }
+
+    #[test]
+    fn compressedv1_payload_sizes_are_summed() {
+        let header = compressedv1_header(0x1000, 0x234);
+        let block = parse_lzfse_block_header(&header).expect("v1 block header should parse");
+        assert_eq!(block.data_size, 0x1234);
+    }
+
+    #[test]
+    fn oversized_block_does_not_panic_during_decompression() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&UNCOMPRESSED_MAGIC.to_le_bytes());
+        // n_raw_bytes: a payload size far larger than the data that actually follows
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = lzfse_decompress(&data, 0, None);
+        assert!(!result.success);
+    }
+}

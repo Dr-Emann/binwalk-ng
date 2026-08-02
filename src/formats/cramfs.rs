@@ -121,3 +121,67 @@ pub fn parse_cramfs_header(cramfs_data: &[u8]) -> Result<CramFSHeader, Structure
 
     Err(StructureError)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Offset of the "Compressed ROMFS" signature within a CramFS image
+    const SIGNATURE_OFFSET: usize = 16;
+    const SIGNATURE: &[u8; 16] = b"Compressed ROMFS";
+
+    /// Builds a minimal, checksum-correct little endian CramFS image
+    fn cramfs_image() -> Vec<u8> {
+        const IMAGE_SIZE: usize = 64;
+        const CHECKSUM_OFFSET: usize = 32;
+        const FILE_COUNT_OFFSET: usize = 44;
+
+        let mut image = vec![0u8; IMAGE_SIZE];
+        image[0..4].copy_from_slice(&0x28CD3D45u32.to_le_bytes());
+        image[4..8].copy_from_slice(&(IMAGE_SIZE as u32).to_le_bytes());
+        image[SIGNATURE_OFFSET..SIGNATURE_OFFSET + SIGNATURE.len()].copy_from_slice(SIGNATURE);
+        image[FILE_COUNT_OFFSET..FILE_COUNT_OFFSET + 4].copy_from_slice(&1u32.to_le_bytes());
+
+        // The checksum is calculated over the image with its own field zeroed out, which it
+        // already is at this point
+        let checksum = common::crc32(&image);
+        image[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn signature_match_before_header_start_is_rejected() {
+        // The Aho-Corasick match is reported wherever the string occurs, including at offsets
+        // where no CramFS header could precede it
+        let mut data = SIGNATURE.to_vec();
+        data.resize(48, 0);
+
+        for offset in 0..SIGNATURE_OFFSET {
+            assert!(
+                cramfs_parser(&data, offset).is_err(),
+                "signature at offset {offset} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_at_start_of_image_is_accepted() {
+        let image = cramfs_image();
+        let result = cramfs_parser(&image, SIGNATURE_OFFSET).expect("valid image should parse");
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.size, image.len());
+        assert_eq!(result.confidence, CONFIDENCE_HIGH);
+    }
+
+    #[test]
+    fn signature_after_leading_data_is_accepted() {
+        const PREFIX_LEN: usize = 16;
+
+        let mut data = vec![0xFFu8; PREFIX_LEN];
+        data.extend_from_slice(&cramfs_image());
+
+        let result =
+            cramfs_parser(&data, PREFIX_LEN + SIGNATURE_OFFSET).expect("valid image should parse");
+        assert_eq!(result.offset, PREFIX_LEN);
+    }
+}

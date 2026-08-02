@@ -507,3 +507,67 @@ fn extract_romfs_entries(
     // Return the number of files extracted
     file_count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMAGE_SIZE: usize = 64;
+    const CHECKSUM_OFFSET: usize = 12;
+    const VOLUME_NAME_OFFSET: usize = 16;
+    const ENTRY_OFFSET: usize = 32;
+    const ENTRY_NAME_OFFSET: usize = ENTRY_OFFSET + 16;
+
+    /// Sets the header checksum such that the big endian words of the image sum to zero
+    fn fixup_checksum(image: &mut [u8]) {
+        let mut sum = 0u32;
+        for word in image.chunks_exact(std::mem::size_of::<u32>()) {
+            sum = sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()));
+        }
+        image[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]
+            .copy_from_slice(&sum.wrapping_neg().to_be_bytes());
+    }
+
+    /// Builds a RomFS image containing a single directory entry whose child list points back at
+    /// the directory entry itself
+    fn self_referential_image() -> Vec<u8> {
+        const DIRECTORY: u32 = 1;
+
+        let mut image = vec![0u8; IMAGE_SIZE];
+        image[0..8].copy_from_slice(b"-rom1fs-");
+        image[8..12].copy_from_slice(&(IMAGE_SIZE as u32).to_be_bytes());
+        image[VOLUME_NAME_OFFSET] = b'v';
+
+        // The low bits of the next header offset hold the file type; a next offset of 0 ends the
+        // sibling chain
+        image[ENTRY_OFFSET..ENTRY_OFFSET + 4].copy_from_slice(&DIRECTORY.to_be_bytes());
+        image[ENTRY_OFFSET + 4..ENTRY_OFFSET + 8]
+            .copy_from_slice(&(ENTRY_OFFSET as u32).to_be_bytes());
+        image[ENTRY_NAME_OFFSET] = b'd';
+
+        fixup_checksum(&mut image);
+        image
+    }
+
+    #[test]
+    fn image_header_is_valid() {
+        let image = self_referential_image();
+        let header = parse_romfs_header(&image).expect("header should parse");
+        assert_eq!(header.image_size, IMAGE_SIZE);
+        assert_eq!(header.header_size, ENTRY_OFFSET);
+        assert_eq!(header.volume_name, "v");
+    }
+
+    #[test]
+    fn self_referential_directory_terminates() {
+        // The result doesn't matter, only that the parser returns at all: a directory whose
+        // children start at its own offset recurses forever, overflowing the stack in every
+        // build mode.
+        let _ = process_romfs_entries(&self_referential_image(), ENTRY_OFFSET);
+    }
+
+    #[test]
+    fn self_referential_directory_terminates_during_scan() {
+        let _ = romfs_parser(&self_referential_image(), 0);
+    }
+}

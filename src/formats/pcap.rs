@@ -235,3 +235,104 @@ pub fn pcapng_carver(
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECTION_HEADER_BLOCK_TYPE: u32 = 0x0A0D0D0A;
+
+    fn push_u32(data: &mut Vec<u8>, value: u32, endianness: Endianness) {
+        match endianness {
+            Endianness::Little => data.extend_from_slice(&value.to_le_bytes()),
+            Endianness::Big => data.extend_from_slice(&value.to_be_bytes()),
+        }
+    }
+
+    fn block_header(block_type: u32, block_size: u32, endianness: Endianness) -> Vec<u8> {
+        let mut data = Vec::new();
+        push_u32(&mut data, block_type, endianness);
+        push_u32(&mut data, block_size, endianness);
+        data
+    }
+
+    /// Builds a section header block, the 20 byte structure every pcap-ng file starts with
+    fn section_header(block_size: u32, endianness: Endianness) -> Vec<u8> {
+        const ENDIAN_MAGIC: u32 = 0x1A2B3C4D;
+
+        let mut data = block_header(SECTION_HEADER_BLOCK_TYPE, block_size, endianness);
+        push_u32(&mut data, ENDIAN_MAGIC, endianness);
+        push_u32(&mut data, 0, endianness); // major and minor version
+        push_u32(&mut data, 0, endianness); // section_length
+        assert_eq!(data.len(), std::mem::size_of::<SectionHeader>());
+        data
+    }
+
+    #[test]
+    fn block_size_smaller_than_footer_is_rejected() {
+        // The block footer is a single u32; any block size that can't hold one is invalid
+        for block_size in 0..4 {
+            for endianness in [Endianness::Little, Endianness::Big] {
+                let data = block_header(SECTION_HEADER_BLOCK_TYPE, block_size, endianness);
+                assert!(
+                    parse_pcapng_block(&data, endianness).is_err(),
+                    "block size {block_size} ({endianness}) should be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_with_matching_footer_is_accepted() {
+        const BLOCK_SIZE: u32 = 12;
+
+        for endianness in [Endianness::Little, Endianness::Big] {
+            let mut data = block_header(SECTION_HEADER_BLOCK_TYPE, BLOCK_SIZE, endianness);
+            push_u32(&mut data, BLOCK_SIZE, endianness);
+
+            let block = parse_pcapng_block(&data, endianness);
+            assert!(block.is_ok(), "valid {endianness} block should parse");
+
+            let block = block.unwrap();
+            assert_eq!(block.block_type, SECTION_HEADER_BLOCK_TYPE);
+            assert_eq!(block.block_size, BLOCK_SIZE as usize);
+        }
+    }
+
+    #[test]
+    fn section_block_size_smaller_than_footer_is_rejected() {
+        // The endian magic identifies the endianness before the block size is ever validated, so a
+        // section header is a second way into the block size arithmetic
+        for block_size in 0..4 {
+            for endianness in [Endianness::Little, Endianness::Big] {
+                let data = section_header(block_size, endianness);
+                assert!(
+                    parse_pcapng_section_block(&data).is_err(),
+                    "section block size {block_size} ({endianness}) should be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn section_block_with_matching_footer_is_accepted() {
+        // The footer is the last u32 of the block, so the block must be four bytes longer than the
+        // section header structure itself
+        const BLOCK_SIZE: u32 = 24;
+
+        for endianness in [Endianness::Little, Endianness::Big] {
+            let mut data = section_header(BLOCK_SIZE, endianness);
+            push_u32(&mut data, BLOCK_SIZE, endianness);
+
+            let block = parse_pcapng_section_block(&data);
+            assert!(
+                block.is_ok(),
+                "valid {endianness} section block should parse"
+            );
+
+            let block = block.unwrap();
+            assert_eq!(block.block_size, BLOCK_SIZE as usize);
+            assert_eq!(block.endianness, endianness);
+        }
+    }
+}
