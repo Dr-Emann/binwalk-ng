@@ -153,8 +153,9 @@ fn parse_compressedv1_block_header(lzfse_data: &[u8]) -> Result<LZFSEBlock, Stru
     let (header, _) = BlockV1Header::ref_from_prefix(lzfse_data).map_err(|_| StructureError)?;
     Ok(LZFSEBlock {
         eof: false,
-        data_size: (header.n_literal_payload_bytes.get() + header.n_lmd_payload_bytes.get())
-            as usize,
+        // Widen before summing; two u32 payload sizes can overflow a u32 but not a usize
+        data_size: header.n_literal_payload_bytes.get() as usize
+            + header.n_lmd_payload_bytes.get() as usize,
         header_size: HEADER_SIZE,
         uncompressed_size: header.n_raw_bytes.get() as usize,
     })
