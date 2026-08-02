@@ -250,6 +250,12 @@ fn lzfse_decompress(
     output_directory: Option<&Path>,
 ) -> ExtractionResult {
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
+    // A block reports its uncompressed size independently of how much payload follows it, so a
+    // few hundred bytes can claim a multi-gigabyte result and size the allocation below from
+    // nothing. This is not a tight bound on real compression, only one no amount of genuine data
+    // could back: highly compressible input reaches ratios in the thousands, so leave orders of
+    // magnitude of headroom.
+    const MAX_EXPANSION_RATIO: usize = 1 << 16;
 
     let mut exresult = ExtractionResult::default();
 
@@ -283,6 +289,10 @@ fn lzfse_decompress(
     // Decoding it anyway would report success for a zero byte result on a stream we consumed
     // nothing of.
     if !found_end_of_stream {
+        return exresult;
+    }
+
+    if dst_size > src_size.saturating_mul(MAX_EXPANSION_RATIO) {
         return exresult;
     }
 
@@ -356,5 +366,48 @@ mod tests {
 
         let result = lzfse_decompress(&data, 0, None);
         assert!(!result.success);
+    }
+
+    #[test]
+    fn implausible_uncompressed_size_is_rejected_before_allocating() {
+        // A compressed block reports its uncompressed size independently of how much payload
+        // follows, so this whole stream is under a kilobyte while claiming a 4GB result. Without a
+        // bound on the expansion ratio the allocation would be sized from that claim.
+        const COMPRESSEDV1_HEADER_SIZE: usize = 770;
+        const ENDOFSTREAM_MAGIC: u32 = 0x24787662;
+        const RAW_BYTES_OFFSET: usize = 4;
+
+        let mut data = compressedv1_header(0, 0);
+        data[RAW_BYTES_OFFSET..RAW_BYTES_OFFSET + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        data.resize(COMPRESSEDV1_HEADER_SIZE, 0);
+        data.extend_from_slice(&ENDOFSTREAM_MAGIC.to_le_bytes());
+
+        let result = lzfse_decompress(&data, 0, None);
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn plausible_stream_is_still_decompressed() {
+        // A megabyte of one repeated byte compresses by roughly three orders of magnitude, which
+        // is the realistic side of the expansion bound. A failure here means the bound is too
+        // tight and would reject genuinely compressible firmware, not that the input is malformed.
+        let original = vec![0x41u8; 1024 * 1024];
+
+        let mut compressed = vec![0; original.len() * 2];
+        let compressed_len =
+            lzfse::encode_buffer(&original, &mut compressed).expect("test data should encode");
+        compressed.truncate(compressed_len);
+
+        // Pins down the claim the bound rests on, so shrinking MAX_EXPANSION_RATIO towards a
+        // "reasonable" looking number fails here instead of silently dropping real images
+        assert!(
+            original.len() / compressed_len > 1024,
+            "expected a ratio well past 1024:1, got {}:1",
+            original.len() / compressed_len
+        );
+
+        let result = lzfse_decompress(&compressed, 0, None);
+        assert!(result.success, "a genuine LZFSE stream should decompress");
+        assert_eq!(result.size, Some(original.len()));
     }
 }
