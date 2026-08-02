@@ -102,7 +102,12 @@ pub fn get_dib_header_size(bmp_data: &[u8]) -> Result<usize, StructureError> {
         124,
     ];
 
-    let header_size = u32::from_le_bytes(bmp_data[..4].try_into().unwrap());
+    // The caller slices from the end of the file header, which leaves nothing here when the file
+    // stops before the DIB header starts
+    let Some(size_bytes) = bmp_data.first_chunk::<4>() else {
+        return Err(StructureError);
+    };
+    let header_size = u32::from_le_bytes(*size_bytes);
 
     if !valid_header_sizes.contains(&header_size) {
         return Err(StructureError);
@@ -176,4 +181,51 @@ pub fn extract_bmp_image(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE_HEADER_SIZE: usize = 14;
+
+    /// Builds a BMP file header, the 14 bytes that precede the DIB header
+    fn bmp_file_header(total_size: u32, bits_offset: u32) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(b"BM");
+        header.extend_from_slice(&total_size.to_le_bytes());
+        header.extend_from_slice(&0u16.to_le_bytes()); // bf_reserved1
+        header.extend_from_slice(&0u16.to_le_bytes()); // bf_reserved2
+        header.extend_from_slice(&bits_offset.to_le_bytes());
+        assert_eq!(header.len(), FILE_HEADER_SIZE);
+        header
+    }
+
+    #[test]
+    fn dib_header_size_needs_four_bytes_to_read() {
+        for available in 0..4 {
+            assert!(
+                get_dib_header_size(&vec![0u8; available]).is_err(),
+                "{available} bytes is not enough to hold the size field"
+            );
+        }
+    }
+
+    #[test]
+    fn file_ending_at_the_dib_header_is_rejected() {
+        // The file header parses, but the file stops before the DIB header it points at, leaving
+        // the size field with nothing to read
+        let data = bmp_file_header(FILE_HEADER_SIZE as u32, FILE_HEADER_SIZE as u32);
+        let result = extract_bmp_image(&data, 0, None);
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn valid_dib_header_size_is_accepted() {
+        const BITMAPINFOHEADER: u32 = 40;
+
+        let size = get_dib_header_size(&BITMAPINFOHEADER.to_le_bytes())
+            .expect("a documented header size should be accepted");
+        assert_eq!(size, BITMAPINFOHEADER as usize);
+    }
 }
