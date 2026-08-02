@@ -21,9 +21,17 @@ pub fn ntfs_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
     };
 
     if let Ok(ntfs_header) = parse_ntfs_header(&file_data[offset..]) {
-        // The reported sector count does not include the NTFS boot sector itself
+        // The reported sector count does not include the NTFS boot sector itself. Both fields come
+        // from the header, so their product can overflow rather than simply being larger than the
+        // file.
         let sector_size = ntfs_header.sector_size as usize;
-        result.size = sector_size * (ntfs_header.sector_count as usize + 1);
+        let Some(partition_size) = (ntfs_header.sector_count as usize)
+            .checked_add(1)
+            .and_then(|sectors| sectors.checked_mul(sector_size))
+        else {
+            return Err(SignatureError);
+        };
+        result.size = partition_size;
 
         // Simple sanity check on the reported total size
         if result.size > sector_size {
@@ -85,4 +93,54 @@ pub fn parse_ntfs_header(ntfs_data: &[u8]) -> Result<NTFSPartition, StructureErr
     }
 
     Err(StructureError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER_SIZE: usize = 48;
+    const SECTOR_SIZE_OFFSET: usize = 11;
+    const SECTOR_COUNT_OFFSET: usize = 40;
+
+    /// Builds an NTFS boot sector; every field besides these two stays zero, which is what the
+    /// parser requires of the unused ones
+    fn ntfs_header(sector_size: u16, sector_count: u64) -> Vec<u8> {
+        let mut header = vec![0u8; HEADER_SIZE];
+        header[0..11].copy_from_slice(b"\xEB\x52\x90NTFS\x20\x20\x20\x20");
+        header[SECTOR_SIZE_OFFSET..SECTOR_SIZE_OFFSET + 2]
+            .copy_from_slice(&sector_size.to_le_bytes());
+        header[SECTOR_COUNT_OFFSET..SECTOR_COUNT_OFFSET + 8]
+            .copy_from_slice(&sector_count.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn partition_size_that_overflows_is_rejected() {
+        // The boot sector is added to the sector count before the multiply, so the addition and
+        // the multiplication each need guarding; the first pair overflows the add, the second the
+        // multiply
+        for (sector_size, sector_count) in [(u16::MAX, u64::MAX), (u16::MAX, u64::MAX / 2)] {
+            let header = ntfs_header(sector_size, sector_count);
+            assert!(
+                ntfs_parser(&header, 0).is_err(),
+                "{sector_size} x {sector_count} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn plausible_partition_is_accepted() {
+        const SECTOR_SIZE: u16 = 512;
+        const SECTOR_COUNT: u64 = 100;
+
+        let header = ntfs_header(SECTOR_SIZE, SECTOR_COUNT);
+        let result = ntfs_parser(&header, 0).expect("a sane partition should parse");
+
+        // The reported count excludes the boot sector, so the size covers one sector more
+        assert_eq!(
+            result.size,
+            SECTOR_SIZE as usize * (SECTOR_COUNT as usize + 1)
+        );
+    }
 }
