@@ -79,8 +79,10 @@ pub fn parse_pcapng_block(
 
     // Make sure the reserved bit of the block type is not set
     if (result.block_type & BLOCK_TYPE_RESERVED_MASK) == 0 {
-        // Calculate the block footer offsets
-        let block_footer_start = result.block_size - footer_size;
+        // A block whose reported size cannot hold its own footer is invalid
+        let Some(block_footer_start) = result.block_size.checked_sub(footer_size) else {
+            return Err(StructureError);
+        };
 
         // Validate that the block size in the block footer matches the block size in the block header
         if let Some(block_footer_data) = block_data.get(block_footer_start..)
