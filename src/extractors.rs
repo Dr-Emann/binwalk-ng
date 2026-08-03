@@ -1534,8 +1534,9 @@ fn spawn(
         carved_file
     );
 
-    // If the entirety of the source file is this one file type, no need to carve a copy of it, just create a symlink
     let mut linked = false;
+
+    // If the entirety of the source file is this one file type, no need to carve a copy of it, just create a symlink
     if signature.offset == 0 && signature.size == file_data.len() {
         /*
          * Link directly to the source file, rather than via Chroot. Chroot contains the
