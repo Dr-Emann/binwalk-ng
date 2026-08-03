@@ -23,4 +23,4 @@ pub mod formats;
 pub mod magic;
 pub mod signatures;
 pub mod structures;
-pub use binwalk_ng::{AnalysisResults, Binwalk, BinwalkBuilder, BuildError};
+pub use binwalk_ng::{AnalysisResults, Binwalk, BinwalkBuilder, BuildError, MmapUsage};

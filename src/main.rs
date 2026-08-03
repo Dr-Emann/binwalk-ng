@@ -1,5 +1,5 @@
 use binwalk_ng::extractors::Chroot;
-use binwalk_ng::{AnalysisResults, common, extractors};
+use binwalk_ng::{AnalysisResults, MmapUsage, common, extractors};
 use clap::Parser;
 use log::{debug, error, info};
 use rayon::ThreadPool;
@@ -131,7 +131,11 @@ fn main() -> ExitCode {
         .includes(cli_args.include)
         .excludes(cli_args.exclude)
         .full_search(cli_args.search_all)
-        .no_mmap(cli_args.no_mmap)
+        .mmap_usage(if cli_args.no_mmap {
+            MmapUsage::Never
+        } else {
+            MmapUsage::WhenPossible
+        })
         .build()
     {
         Ok(binwalker) => Arc::new(binwalker),
@@ -448,7 +452,7 @@ fn spawn_worker(
 ) {
     pool.spawn(move || {
         // Read in file data
-        let file_data = common::read_or_map_file(&target_file, bw.allow_mmap());
+        let file_data = common::read_or_map_file(&target_file, bw.mmap_usage());
         let file_data: &[u8] = file_data
             .as_ref()
             .map(|data| data.as_ref())
