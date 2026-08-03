@@ -80,11 +80,11 @@ pub struct Binwalk {
     signatures: Vec<signatures::Signature>,
     /// Maps signatures to their corresponding extractors
     extractor_lookup_table: HashMap<String, Option<extractors::Extractor>>,
-    /// If the mmap call is not allowed to be used for reading files
+    /// If the mmap call is allowed to be used for reading files
     ///
     /// Binwalk may abort unexpectedly if mmap is used and the analyzed file(s) are simultaneously
     /// truncated.
-    no_mmap: bool,
+    mmap_usage: MmapUsage,
     /// The most leading zero bytes in any magic pattern that has a non-zero byte
     ///
     /// A pattern match can begin at most this many bytes before the pattern's first non-zero
@@ -123,6 +123,13 @@ pub struct Binwalk {
     zero_run_pattern_len: Option<NonZeroUsize>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum MmapUsage {
+    #[default]
+    WhenPossible,
+    Never,
+}
+
 /// The longest run of consecutive zero bytes anywhere in `pattern`
 fn longest_zero_run(pattern: &[u8]) -> usize {
     pattern
@@ -159,7 +166,7 @@ pub struct BinwalkBuilder {
     exclude: Vec<String>,
     signatures: Vec<signatures::Signature>,
     full_search: bool,
-    no_mmap: bool,
+    mmap_usage: MmapUsage,
 }
 
 impl BinwalkBuilder {
@@ -214,12 +221,14 @@ impl BinwalkBuilder {
         self
     }
 
-    /// Read files without mmap.
+    /// Configure the ability to use mmap for reading files.
+    ///
+    /// Defaults to [`MmapUsage::WhenPossible`]
     ///
     /// Binwalk may abort unexpectedly if mmap is used and the analyzed file(s) are simultaneously
     /// truncated.
-    pub const fn no_mmap(mut self, no_mmap: bool) -> Self {
-        self.no_mmap = no_mmap;
+    pub const fn mmap_usage(mut self, mmap_usage: MmapUsage) -> Self {
+        self.mmap_usage = mmap_usage;
         self
     }
 
@@ -331,7 +340,7 @@ impl BinwalkBuilder {
             grep,
             signatures,
             extractor_lookup_table,
-            no_mmap: self.no_mmap,
+            mmap_usage: self.mmap_usage,
             max_leading_zeros,
             zero_run_pattern_len,
         })
@@ -380,8 +389,8 @@ impl Binwalk {
     }
 
     /// If the mmap call is allowed to be used for reading files
-    pub const fn allow_mmap(&self) -> bool {
-        !self.no_mmap
+    pub const fn mmap_usage(&self) -> MmapUsage {
+        self.mmap_usage
     }
 
     /// Index in [`Binwalk::grep`] of the synthetic all-zero pattern, or `None` if there is none to
@@ -988,7 +997,7 @@ impl Binwalk {
     ) -> AnalysisResults {
         let file_path = target_file.as_ref();
 
-        let file_data = read_or_map_file(file_path, self.allow_mmap());
+        let file_data = read_or_map_file(file_path, self.mmap_usage());
         let file_data: &[u8] = file_data
             .as_ref()
             .map(|data| data.as_ref())
