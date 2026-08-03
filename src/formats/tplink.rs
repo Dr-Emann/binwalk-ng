@@ -148,7 +148,7 @@ pub fn parse_tplink_header(tplink_data: &[u8]) -> Result<TPLinkFirmwareHeader, S
 #[derive(Debug, Default, Clone)]
 pub struct TPLinkRTOSFirmwareHeader {
     pub header_size: usize,
-    pub total_size: u32,
+    pub total_size: usize,
     pub model_number: u16,
     pub hardware_rev_major: u8,
     pub hardware_rev_minor: u8,
@@ -174,7 +174,7 @@ pub fn parse_tplink_rtos_header(
 ) -> Result<TPLinkRTOSFirmwareHeader, StructureError> {
     const HEADER_SIZE: usize = 0x94;
     const MAGIC2_VALUE: u32 = 0x494D4730;
-    const TOTAL_SIZE_OFFSET: u32 = 20;
+    const TOTAL_SIZE_OFFSET: usize = 20;
 
     let (header, _) = TPLinkRTOSHeader::ref_from_prefix(tplink_data).map_err(|_| StructureError)?;
 
@@ -184,9 +184,51 @@ pub fn parse_tplink_rtos_header(
 
     Ok(TPLinkRTOSFirmwareHeader {
         header_size: HEADER_SIZE,
-        total_size: header.data_size.get() + TOTAL_SIZE_OFFSET,
+        // Widen before adding; the data size is a u32 taken straight from the header, so the
+        // constant is enough to carry it past the end of its own type
+        total_size: header.data_size.get() as usize + TOTAL_SIZE_OFFSET,
         model_number: header.model_number.get(),
         hardware_rev_major: header.hardware_revision_major,
         hardware_rev_minor: header.hardware_revision_minor,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER_SIZE: usize = 32;
+    const MAGIC2_OFFSET: usize = 20;
+    const DATA_SIZE_OFFSET: usize = 24;
+    const TOTAL_SIZE_OFFSET: usize = 20;
+
+    /// Builds an RTOS firmware header; only the second magic is validated, so the rest can stay
+    /// zero apart from the size under test
+    fn rtos_header(data_size: u32) -> Vec<u8> {
+        const MAGIC2: u32 = 0x494D4730;
+
+        let mut header = vec![0u8; HEADER_SIZE];
+        header[0..4].copy_from_slice(b"\x00\x14\x2F\xC0");
+        header[MAGIC2_OFFSET..MAGIC2_OFFSET + 4].copy_from_slice(&MAGIC2.to_be_bytes());
+        header[DATA_SIZE_OFFSET..DATA_SIZE_OFFSET + 4].copy_from_slice(&data_size.to_be_bytes());
+        header
+    }
+
+    #[test]
+    fn largest_data_size_does_not_overflow() {
+        let header = rtos_header(u32::MAX);
+        let parsed = parse_tplink_rtos_header(&header).expect("the header should parse");
+
+        // The sum has to be widened; it does not fit in the u32 the size was read from
+        assert_eq!(parsed.total_size, u32::MAX as usize + TOTAL_SIZE_OFFSET);
+    }
+
+    #[test]
+    fn total_size_includes_the_offset() {
+        const DATA_SIZE: u32 = 0x1000;
+
+        let header = rtos_header(DATA_SIZE);
+        let parsed = parse_tplink_rtos_header(&header).expect("the header should parse");
+        assert_eq!(parsed.total_size, DATA_SIZE as usize + TOTAL_SIZE_OFFSET);
+    }
 }
