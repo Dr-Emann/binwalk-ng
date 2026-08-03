@@ -5,6 +5,7 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -119,7 +120,7 @@ pub struct Binwalk {
     /// offset in the run, and nothing but a byte its signature requires to be non-zero can rule
     /// one out. Making this pattern longer than any such magic plus the distance back to that byte
     /// keeps the byte inside the run, and so zero, for every match of it not reported first.
-    zero_run_pattern_len: Option<usize>,
+    zero_run_pattern_len: Option<NonZeroUsize>,
 }
 
 /// The longest run of consecutive zero bytes anywhere in `pattern`
@@ -311,8 +312,10 @@ impl BinwalkBuilder {
         // Searched alongside the real patterns to spot runs of zero bytes that can be skipped
         // past. The length is only zero when there are no real patterns to search for at all, and
         // an empty pattern would match at every offset.
-        let zero_run_pattern_len = zero_run_pattern_len.filter(|&len| len > 0);
-        patterns.extend(zero_run_pattern_len.map(|len| vec![0u8; len]));
+        let zero_run_pattern_len = zero_run_pattern_len.and_then(NonZeroUsize::new);
+        if let Some(zero_run_pattern_len) = zero_run_pattern_len {
+            patterns.push(vec![0; zero_run_pattern_len.get()]);
+        }
 
         /*
          * Same pattern matching algorithm used by fgrep.
@@ -385,7 +388,8 @@ impl Binwalk {
     /// match
     fn zero_run_pattern_index(&self) -> Option<usize> {
         self.zero_run_pattern_len
-            .map(|_| self.grep.patterns_len() - 1)
+            .is_some()
+            .then(|| self.grep.patterns_len() - 1)
     }
 
     /// Where to resume scanning after the synthetic all-zero pattern matched, between
@@ -1055,7 +1059,8 @@ mod tests {
         let binwalker = Binwalk::new();
         let zero_run_pattern_len = binwalker
             .zero_run_pattern_len
-            .expect("the default signatures should allow skipping runs of zeros");
+            .expect("the default signatures should allow skipping runs of zeros")
+            .get();
 
         // The patterns are not kept around after the automaton is built, so re-derive the ones a
         // default Binwalk searches for: every magic of every non-short signature.
