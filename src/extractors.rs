@@ -149,8 +149,12 @@ use std::io::Write;
 use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::symlink as symlink_file;
 #[cfg(windows)]
 use std::os::windows;
+#[cfg(windows)]
+use std::os::windows::fs::symlink_file;
 use std::path::Path;
 use std::path::{self, Component, PathBuf};
 use std::process;
@@ -1483,18 +1487,6 @@ pub fn execute(
     }
 
     result
-}
-
-/// Creates a symlink at `link_path` pointing to the file at `source_path`.
-#[cfg(unix)]
-fn symlink_file(source_path: &Path, link_path: impl AsRef<Path>) -> Result<(), std::io::Error> {
-    unix_fs::symlink(source_path, link_path)
-}
-
-/// Creates a symlink at `link_path` pointing to the file at `source_path`.
-#[cfg(windows)]
-fn symlink_file(source_path: &Path, link_path: impl AsRef<Path>) -> Result<(), std::io::Error> {
-    std::os::windows::fs::symlink_file(source_path, link_path)
 }
 
 /// Spawn an external extractor process.
