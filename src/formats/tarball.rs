@@ -31,8 +31,11 @@ pub fn tarball_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult
     // Keep a count of how many tar entry headers were validated
     let mut valid_header_count: usize = 0;
 
-    // Calculate the actual start of the tarball (header magic does not start at the beginning of a tar entry)
-    let tarball_start_offset = offset - TARBALL_MAGIC_OFFSET;
+    // Calculate the actual start of the tarball (header magic does not start at the beginning of a
+    // tar entry), so a match too close to the start of the file has no room for one
+    let Some(tarball_start_offset) = offset.checked_sub(TARBALL_MAGIC_OFFSET) else {
+        return Err(SignatureError);
+    };
 
     // Tarball magic bytes do not start at the beginning of the tarball file
     let mut next_header_start = tarball_start_offset;

@@ -153,8 +153,9 @@ fn parse_compressedv1_block_header(lzfse_data: &[u8]) -> Result<LZFSEBlock, Stru
     let (header, _) = BlockV1Header::ref_from_prefix(lzfse_data).map_err(|_| StructureError)?;
     Ok(LZFSEBlock {
         eof: false,
-        data_size: (header.n_literal_payload_bytes.get() + header.n_lmd_payload_bytes.get())
-            as usize,
+        // Widen before summing; two u32 payload sizes can overflow a u32 but not a usize
+        data_size: header.n_literal_payload_bytes.get() as usize
+            + header.n_lmd_payload_bytes.get() as usize,
         header_size: HEADER_SIZE,
         uncompressed_size: header.n_raw_bytes.get() as usize,
     })
@@ -249,25 +250,51 @@ fn lzfse_decompress(
     output_directory: Option<&Path>,
 ) -> ExtractionResult {
     const OUTPUT_FILE_NAME: &str = "decompressed.bin";
+    // A block reports its uncompressed size independently of how much payload follows it, so a
+    // few hundred bytes can claim a multi-gigabyte result and size the allocation below from
+    // nothing. This is not a tight bound on real compression, only one no amount of genuine data
+    // could back: highly compressible input reaches ratios in the thousands, so leave orders of
+    // magnitude of headroom.
+    const MAX_EXPANSION_RATIO: usize = 1 << 16;
 
     let mut exresult = ExtractionResult::default();
 
     let data = &file_data[offset..];
     let mut dst_size = 0;
+    let mut found_end_of_stream = false;
     let src_size = {
         let mut remaining_data = data;
         while let Ok(lzfse_block) = parse_lzfse_block_header(remaining_data) {
             let block_size = lzfse_block.header_size + lzfse_block.data_size;
+            // A block header may claim more data than the file actually contains; consume only
+            // what is there, before dst_size is credited with the block's output
+            let Some(next_data) = remaining_data.get(block_size..) else {
+                break;
+            };
             dst_size += lzfse_block.uncompressed_size;
-            remaining_data = &remaining_data[block_size..];
+            remaining_data = next_data;
             if lzfse_block.eof {
+                found_end_of_stream = true;
                 break;
             }
             // We'll never return a header with zero size, but if we did, this would be an infinite loop
-            assert!(block_size > 0);
+            if block_size == 0 {
+                break;
+            }
         }
         data.len() - remaining_data.len()
     };
+
+    // Without an end-of-stream block the data is truncated or was never LZFSE to begin with.
+    // Decoding it anyway would report success for a zero byte result on a stream we consumed
+    // nothing of.
+    if !found_end_of_stream {
+        return exresult;
+    }
+
+    if dst_size > src_size.saturating_mul(MAX_EXPANSION_RATIO) {
+        return exresult;
+    }
 
     // The LZFSE API can't differentiate between decompressing exactly the right amount of data and
     // truncation (see https://github.com/lzfse/lzfse/issues/5#issuecomment-237134992), so
@@ -285,4 +312,102 @@ fn lzfse_decompress(
     }
 
     exresult
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMPRESSEDV1_MAGIC: u32 = 0x31787662;
+    const UNCOMPRESSED_MAGIC: u32 = 0x2d787662;
+
+    /// Builds a `bvx1` block header with the two attacker controlled payload size fields set to
+    /// arbitrary values. The returned buffer is exactly `size_of::<BlockV1Header>()` bytes.
+    fn compressedv1_header(n_literal_payload_bytes: u32, n_lmd_payload_bytes: u32) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&COMPRESSEDV1_MAGIC.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_raw_bytes
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_payload_bytes
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_literals
+        header.extend_from_slice(&0u32.to_le_bytes()); // n_matches
+        header.extend_from_slice(&n_literal_payload_bytes.to_le_bytes());
+        header.extend_from_slice(&n_lmd_payload_bytes.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // literal_bits
+        header.extend_from_slice(&0u64.to_le_bytes()); // literal_state
+        header.extend_from_slice(&0u32.to_le_bytes()); // lmd_bits
+        header.extend_from_slice(&0u16.to_le_bytes()); // l_state
+        header.extend_from_slice(&0u16.to_le_bytes()); // m_state
+        header.extend_from_slice(&0u16.to_le_bytes()); // d_state
+        assert_eq!(header.len(), std::mem::size_of::<BlockV1Header>());
+        header
+    }
+
+    #[test]
+    fn compressedv1_payload_sizes_do_not_overflow() {
+        let header = compressedv1_header(u32::MAX, u32::MAX);
+        let block = parse_lzfse_block_header(&header).expect("v1 block header should parse");
+        // The two u32 fields must be widened to usize before being summed
+        assert_eq!(block.data_size, 0x1_FFFF_FFFE);
+    }
+
+    #[test]
+    fn compressedv1_payload_sizes_are_summed() {
+        let header = compressedv1_header(0x1000, 0x234);
+        let block = parse_lzfse_block_header(&header).expect("v1 block header should parse");
+        assert_eq!(block.data_size, 0x1234);
+    }
+
+    #[test]
+    fn oversized_block_does_not_panic_during_decompression() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&UNCOMPRESSED_MAGIC.to_le_bytes());
+        // n_raw_bytes: a payload size far larger than the data that actually follows
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = lzfse_decompress(&data, 0, None);
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn implausible_uncompressed_size_is_rejected_before_allocating() {
+        // A compressed block reports its uncompressed size independently of how much payload
+        // follows, so this whole stream is under a kilobyte while claiming a 4GB result. Without a
+        // bound on the expansion ratio the allocation would be sized from that claim.
+        const COMPRESSEDV1_HEADER_SIZE: usize = 770;
+        const ENDOFSTREAM_MAGIC: u32 = 0x24787662;
+        const RAW_BYTES_OFFSET: usize = 4;
+
+        let mut data = compressedv1_header(0, 0);
+        data[RAW_BYTES_OFFSET..RAW_BYTES_OFFSET + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        data.resize(COMPRESSEDV1_HEADER_SIZE, 0);
+        data.extend_from_slice(&ENDOFSTREAM_MAGIC.to_le_bytes());
+
+        let result = lzfse_decompress(&data, 0, None);
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn plausible_stream_is_still_decompressed() {
+        // A megabyte of one repeated byte compresses by roughly three orders of magnitude, which
+        // is the realistic side of the expansion bound. A failure here means the bound is too
+        // tight and would reject genuinely compressible firmware, not that the input is malformed.
+        let original = vec![0x41u8; 1024 * 1024];
+
+        let mut compressed = vec![0; original.len() * 2];
+        let compressed_len =
+            lzfse::encode_buffer(&original, &mut compressed).expect("test data should encode");
+        compressed.truncate(compressed_len);
+
+        // Pins down the claim the bound rests on, so shrinking MAX_EXPANSION_RATIO towards a
+        // "reasonable" looking number fails here instead of silently dropping real images
+        assert!(
+            original.len() / compressed_len > 1024,
+            "expected a ratio well past 1024:1, got {}:1",
+            original.len() / compressed_len
+        );
+
+        let result = lzfse_decompress(&compressed, 0, None);
+        assert!(result.success, "a genuine LZFSE stream should decompress");
+        assert_eq!(result.size, Some(original.len()));
+    }
 }

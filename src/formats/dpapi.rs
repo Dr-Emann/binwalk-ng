@@ -152,12 +152,15 @@ pub fn parse_dpapi_blob_header(dpapi_blob_data: &[u8]) -> Result<DPAPIBlobHeader
         return Err(StructureError);
     }
 
-    let utf16_vec =
-        utf8_to_utf16(&dpapi_blob_data[offset..=offset + description_len]).ok_or(StructureError)?;
+    let description = dpapi_blob_data
+        .get(offset..=offset + description_len)
+        .ok_or(StructureError)?;
+    let utf16_vec = utf8_to_utf16(description).ok_or(StructureError)?;
     let desc = String::from_utf16(&utf16_vec).map_err(|_| StructureError)?;
 
-    // NULL character becomes size 1 from size 2
-    if description_len != desc.len() - 1 {
+    // NULL character becomes size 1 from size 2; stated as an addition so that an empty
+    // description, which has no NULL to account for, is rejected rather than underflowing
+    if desc.len() != description_len + 1 {
         return Err(StructureError);
     }
 

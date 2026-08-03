@@ -3,6 +3,7 @@ use crate::extractors::{Chroot, ExtractionError, ExtractionResult, Extractor, Ex
 use crate::signatures::{CONFIDENCE_HIGH, SignatureError, SignatureResult};
 use crate::structures::StructureError;
 use log::warn;
+use std::collections::HashSet;
 use std::path::Path;
 use zerocopy::{BE, FromBytes, Immutable, KnownLayout, Unaligned};
 
@@ -340,9 +341,37 @@ fn process_romfs_entries(
     romfs_data: &[u8],
     offset: usize,
 ) -> Result<Vec<RomFSEntry>, ExtractionError> {
+    let mut processed_entries = HashSet::new();
+    process_romfs_entries_inner(romfs_data, offset, &mut processed_entries, 0)
+}
+
+/// Bounds how many stack frames a crafted image can force this recursion to use.
+///
+/// Sharing `processed_entries` across the traversal already stops an image from revisiting an
+/// entry, but that still permits nesting as deep as the image has entries, which is enough to
+/// exhaust the stack on a large one. This limit is instead chosen to be unreachable by real data:
+/// `PATH_MAX` leaves room for roughly 2000 single-character components, and a RomFS image is a
+/// small embedded filesystem that nests nowhere near that.
+const MAX_DIRECTORY_DEPTH: usize = 1024;
+
+/// Processes the RomFS entries starting at `offset`, descending into directories.
+///
+/// `processed_entries` is shared across the whole traversal rather than being per directory: an
+/// entry reached twice means the image points back at itself, and descending into it again would
+/// recurse forever.
+fn process_romfs_entries_inner(
+    romfs_data: &[u8],
+    offset: usize,
+    processed_entries: &mut HashSet<usize>,
+    depth: usize,
+) -> Result<Vec<RomFSEntry>, ExtractionError> {
+    if depth >= MAX_DIRECTORY_DEPTH {
+        warn!("RomFS directory nesting exceeds {MAX_DIRECTORY_DEPTH} levels");
+        return Err(ExtractionError);
+    }
+
     let mut previous_file_offset = None;
     let mut file_entries: Vec<RomFSEntry> = vec![];
-    let mut processed_entries: Vec<usize> = vec![];
     let ignore_file_names: Vec<String> = vec![".".to_string(), "..".to_string()];
 
     // Total available data
@@ -357,10 +386,8 @@ fn process_romfs_entries(
      */
     while file_offset != 0 && is_offset_safe(available_data, file_offset, previous_file_offset) {
         // Sanity check, no two entries should exist at the same offset, if so, infinite recursion could ensue
-        if processed_entries.contains(&file_offset) {
+        if !processed_entries.insert(file_offset) {
             break;
-        } else {
-            processed_entries.push(file_offset);
         }
 
         // Parse the next file entry
@@ -416,7 +443,12 @@ fn process_romfs_entries(
                 // Directories have children; process them
                 if file_entry.directory {
                     {
-                        let children = process_romfs_entries(romfs_data, file_entry.info)?;
+                        let children = process_romfs_entries_inner(
+                            romfs_data,
+                            file_entry.info,
+                            processed_entries,
+                            depth + 1,
+                        )?;
                         file_entry.children = children
                     }
                 }
@@ -506,4 +538,123 @@ fn extract_romfs_entries(
 
     // Return the number of files extracted
     file_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IMAGE_SIZE: usize = 64;
+    const CHECKSUM_OFFSET: usize = 12;
+    const VOLUME_NAME_OFFSET: usize = 16;
+    const ENTRY_OFFSET: usize = 32;
+    const ENTRY_NAME_OFFSET: usize = ENTRY_OFFSET + 16;
+
+    /// Sets the header checksum such that the big endian words of the image sum to zero
+    fn fixup_checksum(image: &mut [u8]) {
+        let mut sum = 0u32;
+        for word in image.chunks_exact(std::mem::size_of::<u32>()) {
+            sum = sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()));
+        }
+        image[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]
+            .copy_from_slice(&sum.wrapping_neg().to_be_bytes());
+    }
+
+    /// Builds a RomFS image containing a single directory entry whose child list points back at
+    /// the directory entry itself
+    fn self_referential_image() -> Vec<u8> {
+        const DIRECTORY: u32 = 1;
+
+        let mut image = vec![0u8; IMAGE_SIZE];
+        image[0..8].copy_from_slice(b"-rom1fs-");
+        image[8..12].copy_from_slice(&(IMAGE_SIZE as u32).to_be_bytes());
+        image[VOLUME_NAME_OFFSET] = b'v';
+
+        // The low bits of the next header offset hold the file type; a next offset of 0 ends the
+        // sibling chain
+        image[ENTRY_OFFSET..ENTRY_OFFSET + 4].copy_from_slice(&DIRECTORY.to_be_bytes());
+        image[ENTRY_OFFSET + 4..ENTRY_OFFSET + 8]
+            .copy_from_slice(&(ENTRY_OFFSET as u32).to_be_bytes());
+        image[ENTRY_NAME_OFFSET] = b'd';
+
+        fixup_checksum(&mut image);
+        image
+    }
+
+    #[test]
+    fn image_header_is_valid() {
+        let image = self_referential_image();
+        let header = parse_romfs_header(&image).expect("header should parse");
+        assert_eq!(header.image_size, IMAGE_SIZE);
+        assert_eq!(header.header_size, ENTRY_OFFSET);
+        assert_eq!(header.volume_name, "v");
+    }
+
+    #[test]
+    fn self_referential_directory_terminates() {
+        // The result doesn't matter, only that the parser returns at all: a directory whose
+        // children start at its own offset recurses forever, overflowing the stack in every
+        // build mode.
+        let _ = process_romfs_entries(&self_referential_image(), ENTRY_OFFSET);
+    }
+
+    #[test]
+    fn self_referential_directory_terminates_during_scan() {
+        let _ = romfs_parser(&self_referential_image(), 0);
+    }
+
+    /// Builds an image of `depth` directories, each one the sole child of the previous
+    fn nested_directories_image(depth: usize) -> Vec<u8> {
+        const DIRECTORY: u32 = 1;
+        const ENTRY_SIZE: usize = 32;
+
+        // One trailing entry's worth of slack, so the last directory's data offset stays in bounds
+        let image_size = ENTRY_OFFSET + (depth + 1) * ENTRY_SIZE;
+        let mut image = vec![0u8; image_size];
+        image[0..8].copy_from_slice(b"-rom1fs-");
+        image[8..12].copy_from_slice(&(image_size as u32).to_be_bytes());
+        image[VOLUME_NAME_OFFSET] = b'v';
+
+        for i in 0..depth {
+            let entry = ENTRY_OFFSET + i * ENTRY_SIZE;
+            let child = entry + ENTRY_SIZE;
+            image[entry..entry + 4].copy_from_slice(&DIRECTORY.to_be_bytes());
+            image[entry + 4..entry + 8].copy_from_slice(&(child as u32).to_be_bytes());
+            image[entry + 16] = b'd';
+        }
+
+        fixup_checksum(&mut image);
+        image
+    }
+
+    #[test]
+    fn nesting_at_the_depth_limit_does_not_exhaust_the_stack() {
+        // Drives the recursion to MAX_DIRECTORY_DEPTH to show the limit is low enough that the
+        // frames it permits actually fit. The test harness gives this thread a smaller stack than
+        // main gets, so passing here is the stricter check.
+        let image = nested_directories_image(MAX_DIRECTORY_DEPTH + 1);
+        assert!(
+            process_romfs_entries(&image, ENTRY_OFFSET).is_err(),
+            "nesting past the limit should be rejected, not truncated silently"
+        );
+    }
+
+    #[test]
+    fn nesting_within_the_depth_limit_is_accepted() {
+        const DEPTH: usize = MAX_DIRECTORY_DEPTH - 1;
+
+        let image = nested_directories_image(DEPTH);
+        let entries =
+            process_romfs_entries(&image, ENTRY_OFFSET).expect("nesting below the limit is valid");
+
+        // Walk the chain rather than trusting the top level count, so a traversal that gave up
+        // after the first directory can't pass this
+        let mut depth = 0;
+        let mut children = &entries;
+        while let Some(entry) = children.first() {
+            depth += 1;
+            children = &entry.children;
+        }
+        assert_eq!(depth, DEPTH);
+    }
 }

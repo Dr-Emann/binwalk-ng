@@ -44,8 +44,11 @@ pub fn uefi_volume_parser(
 
         // Parse the volume header
         if let Ok(uefi_volume_header) = parse_uefi_volume_header(&file_data[result.offset..]) {
-            // Make sure the volume size is sane
-            if file_data.len() >= (result.offset + uefi_volume_header.volume_size) {
+            // Make sure the volume size is sane; it comes from the header, so adding it to the
+            // volume start can overflow before the comparison gets to reject it
+            if let Some(volume_end) = result.offset.checked_add(uefi_volume_header.volume_size)
+                && file_data.len() >= volume_end
+            {
                 result.size = uefi_volume_header.volume_size;
                 result.description = format!(
                     "{}, header CRC: {:#X}, header size: {} bytes, total size: {} bytes",
@@ -213,5 +216,57 @@ pub fn uefi_extractor() -> extractors::Extractor {
          * Recursing into this data would result in double extractions for no good reason.
          */
         do_not_recurse: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAGIC_OFFSET: usize = 40;
+    const HEADER_SIZE: usize = 24;
+    const RESERVED_OFFSET: usize = 22;
+    const REVISION_OFFSET: usize = 23;
+
+    /// Builds a file whose UEFI volume header starts at `volume_start`, with the magic the scan
+    /// would have matched sitting `MAGIC_OFFSET` bytes further in
+    fn uefi_image(volume_start: usize, volume_size: u64, total_len: usize) -> Vec<u8> {
+        // Only has to be smaller than the volume size for the header to be accepted
+        const REPORTED_HEADER_SIZE: u16 = 24;
+
+        let mut data = vec![0u8; total_len];
+        data[volume_start..volume_start + 8].copy_from_slice(&volume_size.to_le_bytes());
+        data[volume_start + 16..volume_start + 18]
+            .copy_from_slice(&REPORTED_HEADER_SIZE.to_le_bytes());
+        data[volume_start + RESERVED_OFFSET] = 0;
+        data[volume_start + REVISION_OFFSET] = 1;
+        data
+    }
+
+    #[test]
+    fn volume_size_that_overflows_is_rejected() {
+        // The volume has to start past the beginning of the file for the addition to be able to
+        // wrap, which is why the magic is placed beyond its own offset here
+        const VOLUME_START: usize = 8;
+
+        let data = uefi_image(VOLUME_START, u64::MAX, VOLUME_START + HEADER_SIZE);
+        assert!(uefi_volume_parser(&data, VOLUME_START + MAGIC_OFFSET).is_err());
+    }
+
+    #[test]
+    fn plausible_volume_is_accepted() {
+        const VOLUME_START: usize = 8;
+        const VOLUME_SIZE: u64 = 64;
+
+        let data = uefi_image(
+            VOLUME_START,
+            VOLUME_SIZE,
+            VOLUME_START + VOLUME_SIZE as usize,
+        );
+        let result = uefi_volume_parser(&data, VOLUME_START + MAGIC_OFFSET)
+            .expect("a sane volume should parse");
+
+        assert_eq!(result.offset, VOLUME_START);
+        assert_eq!(result.size, VOLUME_SIZE as usize);
     }
 }

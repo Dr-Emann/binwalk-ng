@@ -41,8 +41,11 @@ pub fn dmg_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, Si
          * Instead, we have to search the file data for the XML property, then the correct offset can be calculated.
          */
 
-        // Make sure the length of image data and length of XML data are sane
-        if (dmg_footer.data_length + dmg_footer.xml_length) <= offset {
+        // Make sure the length of image data and length of XML data are sane; both come straight
+        // from the footer, so their sum can overflow before it can be compared
+        if let Some(content_length) = dmg_footer.data_length.checked_add(dmg_footer.xml_length)
+            && content_length <= offset
+        {
             // Locate the XML data
             if let Some(xml_offset) = find_xml_property_list(file_data) {
                 // Make sure the XML data comes after the image data

@@ -47,8 +47,11 @@ pub fn jboot_arm_parser(
         ..Default::default()
     };
 
-    // Actual header starts MAGIC_OFFSET bytes before the magic bytes
-    let header_start = offset - MAGIC_OFFSET;
+    // Actual header starts MAGIC_OFFSET bytes before the magic bytes, so a match too close to the
+    // start of the file has no room for one
+    let Some(header_start) = offset.checked_sub(MAGIC_OFFSET) else {
+        return Err(SignatureError);
+    };
 
     if let Some(jboot_data) = file_data.get(header_start..)
         && let Ok(arm_header) = parse_jboot_arm_header(jboot_data)

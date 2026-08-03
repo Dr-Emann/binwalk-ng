@@ -27,7 +27,14 @@ pub fn apfs_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, S
 
         if let Ok(apfs_header) = parse_apfs_header(&file_data[result.offset..]) {
             let mut truncated_message = "".to_string();
-            result.size = apfs_header.block_count * apfs_header.block_size;
+
+            // Both come from the header, so their product can overflow rather than simply being
+            // larger than the file
+            let Some(image_size) = apfs_header.block_count.checked_mul(apfs_header.block_size)
+            else {
+                return Err(SignatureError);
+            };
+            result.size = image_size;
 
             // It is observed that an APFS contained in an EFIGPT with a protective MBR includes the MBR block in its size.
             // If the APFS image is pulled out of the EFIGPT, the reported size will be 512 bytes too long, but otherwise valid.
@@ -142,4 +149,47 @@ pub fn parse_apfs_header(apfs_data: &[u8]) -> Result<APFSHeader, StructureError>
     }
 
     Err(StructureError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK_SIZE_OFFSET: usize = MAGIC_OFFSET + 4;
+    const BLOCK_COUNT_OFFSET: usize = MAGIC_OFFSET + 8;
+    const MAX_FILE_SYSTEMS_OFFSET: usize = MAGIC_OFFSET + 148;
+
+    /// Builds an APFS superblock. Every field the parser sanity checks besides these two is left
+    /// zero, which is the accepted value for all of them except the file system count.
+    fn apfs_image(block_size: u32, block_count: u64) -> Vec<u8> {
+        // Divided by 512 and rounded up, this has to land between 1 and 100
+        const MAX_FILE_SYSTEMS: u32 = 512;
+
+        let mut image = vec![0u8; MAGIC_OFFSET + std::mem::size_of::<APFSHeaderBytes>()];
+        image[MAGIC_OFFSET..MAGIC_OFFSET + 4].copy_from_slice(b"NXSB");
+        image[BLOCK_SIZE_OFFSET..BLOCK_SIZE_OFFSET + 4].copy_from_slice(&block_size.to_le_bytes());
+        image[BLOCK_COUNT_OFFSET..BLOCK_COUNT_OFFSET + 8]
+            .copy_from_slice(&block_count.to_le_bytes());
+        image[MAX_FILE_SYSTEMS_OFFSET..MAX_FILE_SYSTEMS_OFFSET + 4]
+            .copy_from_slice(&MAX_FILE_SYSTEMS.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn image_size_that_overflows_is_rejected() {
+        let image = apfs_image(u32::MAX, u64::MAX);
+        assert!(apfs_parser(&image, MAGIC_OFFSET).is_err());
+    }
+
+    #[test]
+    fn plausible_image_is_accepted() {
+        const BLOCK_SIZE: u32 = 4096;
+        const BLOCK_COUNT: u64 = 10;
+
+        let image = apfs_image(BLOCK_SIZE, BLOCK_COUNT);
+        let result = apfs_parser(&image, MAGIC_OFFSET).expect("a sane superblock should parse");
+
+        assert_eq!(result.offset, 0);
+        assert_eq!(result.size, BLOCK_SIZE as usize * BLOCK_COUNT as usize);
+    }
 }
