@@ -578,15 +578,20 @@ impl Binwalk {
                  * An error indicates a false positive match for the signature type.
                  */
                 if let Ok(mut signature_result) = (signature.parser)(file_data, magic_offset) {
-                    // Calculate the end of this signature's data
-                    let signature_end_offset = signature_result.offset + signature_result.size;
+                    // Calculate the end of this signature's data. A parser reports a size taken
+                    // from the data it just parsed, so the sum can overflow rather than merely
+                    // exceed the file, which the check below would then never see.
+                    let signature_end_offset = signature_result
+                        .offset
+                        .checked_add(signature_result.size)
+                        .filter(|&end| end <= available_data);
 
                     // Sanity check the reported offset and size vs file size
-                    if signature_end_offset > available_data {
+                    let Some(signature_end_offset) = signature_end_offset else {
                         info!("Signature {} extends beyond EOF; ignoring", signature.name);
                         // Continue inner loop
                         continue;
-                    }
+                    };
 
                     // Auto populate some signature result fields
                     signature_result_auto_populate(&mut signature_result, signature);
@@ -1087,6 +1092,46 @@ mod tests {
         // Which also means it is longer than any pattern's leading zeros, so a skip always moves
         // the scan forwards.
         assert!(zero_run_pattern_len > binwalker.max_leading_zeros);
+    }
+
+    /// Builds a file containing a LogFS superblock that claims a filesystem larger than the
+    /// address space, placed `prefix_len` bytes in so the scan has a non-zero offset to add it to
+    fn logfs_claiming_an_impossible_size(prefix_len: usize) -> Vec<u8> {
+        const SUPERBLOCK_OFFSET: usize = 0x18;
+        const SUPERBLOCK_SIZE: usize = 88;
+        const FILESYSTEM_SIZE_OFFSET: usize = 48;
+        const MAGIC: &[u8; 8] = b"\x7A\x3A\x8E\x5C\xB9\xD5\xBF\x67";
+
+        let mut data = vec![0u8; prefix_len + SUPERBLOCK_OFFSET + SUPERBLOCK_SIZE];
+        let magic_start = prefix_len + SUPERBLOCK_OFFSET;
+        data[magic_start..magic_start + MAGIC.len()].copy_from_slice(MAGIC);
+
+        let size_start = prefix_len + FILESYSTEM_SIZE_OFFSET;
+        data[size_start..size_start + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn a_signature_end_offset_that_overflows_is_ignored() {
+        // A parser takes its size from the data it parsed, so adding that to the signature's own
+        // offset can wrap. The filesystem starts past the beginning of the file here, because at
+        // offset zero the sum would merely be huge rather than overflowing.
+        const PREFIX_LEN: usize = 8;
+
+        let data = logfs_claiming_an_impossible_size(PREFIX_LEN);
+
+        // Pins the ingredients of the overflow down, so this cannot go on passing vacuously if the
+        // superblock layout drifts and the magic stops matching
+        let parsed = crate::formats::logfs::logfs_parser(&data, PREFIX_LEN + 0x18)
+            .expect("the crafted superblock should parse");
+        assert_eq!(parsed.offset, PREFIX_LEN);
+        assert_eq!(parsed.size, u64::MAX as usize);
+
+        let results = Binwalk::new().scan(&data);
+        assert!(
+            results.iter().all(|result| result.name != "logfs"),
+            "a signature that cannot fit in the file should not be reported"
+        );
     }
 
     #[test]
