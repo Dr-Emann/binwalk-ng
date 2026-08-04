@@ -36,9 +36,6 @@ THRESH_TIME_PCT = float(os.environ.get("THRESH_TIME_PCT", "20"))
 THRESH_CPU_PCT = float(os.environ.get("THRESH_CPU_PCT", "20"))
 THRESH_MEM_PCT = float(os.environ.get("THRESH_MEM_PCT", "5"))
 
-DHAT_PEAK = re.compile(r"At t-gmax:\s+([\d,]+)")
-DHAT_TOTAL = re.compile(r"Total:\s+([\d,]+) bytes in\s+([\d,]+) blocks")
-
 
 def sha() -> str:
     r = subprocess.run(
@@ -184,34 +181,25 @@ def massif_of(name: str, cmd: list[str]) -> dict[str, int]:
 
 
 def dhat_of(name: str, cmd: list[str]) -> dict[str, int]:
-    out, log = valgrind_of(name, "dhat", ["--tool=dhat"], "--dhat-out-file", cmd)
+    out, _ = valgrind_of(name, "dhat", ["--tool=dhat"], "--dhat-out-file", cmd)
     try:
         data = json.loads(out.read_text())
-    except (OSError, json.JSONDecodeError):
-        data = None
-    if isinstance(data, dict):
-        peak = data.get("t-gmax")
-        total = data.get("tot-bytes")
-        blocks = data.get("tot-blocks")
-        if peak is None or total is None or blocks is None:
-            raise RuntimeError(
-                f"ERROR: dhat JSON for {name} is missing keys t-gmax/tot-bytes/tot-blocks "
-                f"(valgrind schema changed?) — see {out}"
-            )
-        return {
-            "peak_heap_bytes": int(peak),
-            "total_alloc_bytes": int(total),
-            "alloc_count": int(blocks),
-        }
-    text = log.read_text()
-    peak_m = DHAT_PEAK.search(text)
-    total_m = DHAT_TOTAL.search(text)
-    if peak_m is None or total_m is None:
-        raise RuntimeError(f"ERROR: failed to parse dhat output from {log}")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"ERROR: failed to read dhat JSON for {name}: {exc}")
+    pps = data.get("pps")
+    if not isinstance(pps, list) or not pps:
+        raise RuntimeError(
+            f"ERROR: dhat JSON for {name} has no 'pps' array (valgrind schema changed?) — see {out}"
+        )
+    sample = pps[0]
+    if not all(k in sample for k in ("tb", "tbk", "gb")):
+        raise RuntimeError(
+            f"ERROR: dhat JSON for {name} is missing pps fields tb/tbk/gb (valgrind schema changed?) — see {out}"
+        )
     return {
-        "peak_heap_bytes": int(peak_m.group(1).replace(",", "")),
-        "total_alloc_bytes": int(total_m.group(1).replace(",", "")),
-        "alloc_count": int(total_m.group(2).replace(",", "")),
+        "peak_heap_bytes": sum(pp.get("gb", 0) for pp in pps),
+        "total_alloc_bytes": sum(pp.get("tb", 0) for pp in pps),
+        "alloc_count": sum(pp.get("tbk", 0) for pp in pps),
     }
 
 
