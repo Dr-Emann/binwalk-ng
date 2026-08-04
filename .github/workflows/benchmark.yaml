@@ -85,6 +85,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: benchmark-results
+          path: benchmark
 
       - name: Update baseline
         run: |
@@ -128,6 +129,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: benchmark-results
+          path: benchmark
 
       - name: Compare against baseline (PR)
         env:
