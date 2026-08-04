@@ -169,6 +169,15 @@ def valgrind_of(
         raise RuntimeError(
             f"ERROR: binwalk reported an error under valgrind for {name} (see {log})"
         )
+    # Valgrind (esp. DHAT) writes its output files mode 0600 owned by the
+    # invoking user. In CI the benchmark container runs as root (uid 0) and
+    # the upload-artifact step runs as the `runner` user, so those files must
+    # be made world-readable for the artifacts to upload. Only the
+    # valgrind-owned outputs here need relaxing; files written by bench.py
+    # itself are already created with the process umask (0644).
+    for path in (out, log):
+        mode = path.stat().st_mode | 0o444
+        path.chmod(mode)
     return out, log
 
 
