@@ -67,6 +67,7 @@ jobs:
             benchmark/workdir/massif-*.log
             benchmark/workdir/massif-*.out
             benchmark/workdir/dhat-*.log
+            benchmark/workdir/dhat-*.out
           if-no-files-found: ignore
 
   update-baseline:

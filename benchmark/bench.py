@@ -217,9 +217,8 @@ def dhat_of(name: str, cmd: list[str]) -> dict[str, int]:
 
 def gen_workload() -> None:
     corpus = Path(WORKDIR) / "corpus.bin"
-    corpus_data = b"".join(
-        sorted(p.read_bytes() for p in Path(CORPUS_DIR).iterdir() if p.is_file())
-    )
+    files = sorted(p for p in Path(CORPUS_DIR).iterdir() if p.is_file())
+    corpus_data = b"".join(p.read_bytes() for p in files)
     if not corpus_data:
         raise SystemExit(f"ERROR: no input files found in CORPUS_DIR '{CORPUS_DIR}'")
     corpus.write_bytes(corpus_data)
@@ -241,6 +240,7 @@ def run_benchmarks() -> None:
     large = Path(WORKDIR) / "large.bin"
     extract_dir = Path(WORKDIR) / "extract-corpus"
     scan = [str(binwalk), "--threads", str(THREADS), "-q"]
+    list_cmd = [str(binwalk), "-q", "-L"]
 
     print("scan-corpus: wall clock", file=sys.stderr)
     scan_wall, scan_stats = wall_ms_of("scan-corpus", scan + [str(corpus)])
@@ -262,9 +262,9 @@ def run_benchmarks() -> None:
     extract_cpu = cpu_ms_of(extract_cmd, CPU_REPS, clean_extract)
 
     print("list-signatures: wall clock", file=sys.stderr)
-    list_wall, list_stats = wall_ms_of("list-signatures", scan + ["-L"])
+    list_wall, list_stats = wall_ms_of("list-signatures", list_cmd)
     print("list-signatures: cpu time", file=sys.stderr)
-    list_cpu = cpu_ms_of(scan + ["-L"], CPU_REPS)
+    list_cpu = cpu_ms_of(list_cmd, CPU_REPS)
 
     print("scan-large: wall clock", file=sys.stderr)
     large_wall, large_stats = wall_ms_of("scan-large", scan + [str(large)])
