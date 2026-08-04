@@ -61,6 +61,8 @@ def preflight() -> None:
     require("git", "needed to record the benchmarked commit sha")
     if not Path(CORPUS_DIR).is_dir():
         raise SystemExit(f"ERROR: CORPUS_DIR '{CORPUS_DIR}' does not exist")
+    Path(WORKDIR).mkdir(parents=True, exist_ok=True)
+    Path(RESULTS_JSON).parent.mkdir(parents=True, exist_ok=True)
 
 
 def build_binwalk() -> Path:
@@ -134,6 +136,7 @@ def cpu_ms_of(
 def massif_peak(out: Path) -> tuple[int, int]:
     heap = extra = stack = 0
     peak_heap = peak_stack = 0
+    seen_snapshot = False
     for line in out.read_text().splitlines():
         if line.startswith("mem_heap_B="):
             heap = int(line.split("=", 1)[1])
@@ -142,8 +145,11 @@ def massif_peak(out: Path) -> tuple[int, int]:
         elif line.startswith("mem_stacks_B="):
             stack = int(line.split("=", 1)[1])
         elif line.startswith("snapshot="):
+            seen_snapshot = True
             peak_heap = max(peak_heap, heap + extra)
             peak_stack = max(peak_stack, stack)
+    if not seen_snapshot:
+        raise RuntimeError(f"ERROR: massif output contains no snapshots: {out}")
     return max(peak_heap, heap + extra), max(peak_stack, stack)
 
 
@@ -182,23 +188,30 @@ def dhat_of(name: str, cmd: list[str]) -> dict[str, int]:
     try:
         data = json.loads(out.read_text())
     except (OSError, json.JSONDecodeError):
-        data = {}
-    peak = data.get("t-gmax", data.get("t_gmax"))
-    total = data.get("tot-bytes", data.get("tot_bytes"))
-    blocks = data.get("tot-blocks", data.get("tot_blocks"))
-    if peak is None or total is None or blocks is None:
-        text = log.read_text()
-        peak_m = DHAT_PEAK.search(text)
-        total_m = DHAT_TOTAL.search(text)
-        if peak_m is None or total_m is None:
-            raise RuntimeError(f"ERROR: failed to parse dhat output from {log}")
-        peak = peak_m.group(1).replace(",", "")
-        total = total_m.group(1).replace(",", "")
-        blocks = total_m.group(2).replace(",", "")
+        data = None
+    if isinstance(data, dict):
+        peak = data.get("t-gmax")
+        total = data.get("tot-bytes")
+        blocks = data.get("tot-blocks")
+        if peak is None or total is None or blocks is None:
+            raise RuntimeError(
+                f"ERROR: dhat JSON for {name} is missing keys t-gmax/tot-bytes/tot-blocks "
+                f"(valgrind schema changed?) — see {out}"
+            )
+        return {
+            "peak_heap_bytes": int(peak),
+            "total_alloc_bytes": int(total),
+            "alloc_count": int(blocks),
+        }
+    text = log.read_text()
+    peak_m = DHAT_PEAK.search(text)
+    total_m = DHAT_TOTAL.search(text)
+    if peak_m is None or total_m is None:
+        raise RuntimeError(f"ERROR: failed to parse dhat output from {log}")
     return {
-        "peak_heap_bytes": int(peak),
-        "total_alloc_bytes": int(total),
-        "alloc_count": int(blocks),
+        "peak_heap_bytes": int(peak_m.group(1).replace(",", "")),
+        "total_alloc_bytes": int(total_m.group(1).replace(",", "")),
+        "alloc_count": int(total_m.group(2).replace(",", "")),
     }
 
 

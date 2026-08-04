@@ -94,6 +94,11 @@ jobs:
               '.scenarios == $r[0].scenarios' /tmp/baseline.json >/dev/null 2>&1; then
             echo 'Metrics unchanged; keeping the committed baseline'
           else
+            if ! test -s benchmark/results.json \
+            || ! jq -e . benchmark/results.json >/dev/null 2>&1; then
+              echo 'ERROR: benchmark/results.json missing or invalid; not updating baseline' >&2
+              exit 1
+            fi
             tree=$(printf '100644 blob %s\tbaseline.json\n' \
               "$(git hash-object -w benchmark/results.json)" | git mktree)
             parent=$(git rev-parse -q --verify origin/benchmark-baseline || git rev-parse HEAD)
@@ -136,14 +141,19 @@ jobs:
           if git rev-parse -q --verify origin/benchmark-baseline >/dev/null; then
             git show origin/benchmark-baseline:baseline.json > benchmark/baseline.json
             echo '## Benchmark results' >> "$GITHUB_STEP_SUMMARY"
-            python3 benchmark/compare.py \
+            if python3 benchmark/compare.py \
               --results benchmark/results.json \
               --baseline benchmark/baseline.json \
               --time-threshold "$THRESH_TIME_PCT" \
               --cpu-threshold "$THRESH_CPU_PCT" \
               --mem-threshold "$THRESH_MEM_PCT" \
               --compare-json "$COMPARE_JSON" \
-            | tee -a "$GITHUB_STEP_SUMMARY" || true
+              | tee -a "$GITHUB_STEP_SUMMARY"; then
+              :
+            elif ! jq -e . "$COMPARE_JSON" >/dev/null 2>&1; then
+              echo 'ERROR: comparison failed without writing compare.json' >&2
+              exit 1
+            fi
           else
             echo 'No benchmark baseline found yet; skipping comparison'
           fi
