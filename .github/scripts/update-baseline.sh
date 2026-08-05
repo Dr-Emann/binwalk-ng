@@ -2,18 +2,21 @@
 # Update benchmark-baseline branch from target/bench/results.json when metrics changed.
 set -euo pipefail
 
-git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline || true
-if git rev-parse -q --verify origin/benchmark-baseline >/dev/null \
-  && git show origin/benchmark-baseline:baseline.json > /tmp/baseline.json 2>/dev/null \
-  && cmp -s /tmp/baseline.json target/bench/results.json; then
-  echo 'Metrics unchanged; keeping the committed baseline'
-  exit 0
-fi
-
 if ! test -s target/bench/results.json \
-  || ! jq -e . target/bench/results.json >/dev/null 2>&1; then
+  || ! jq -e 'type == "array"' target/bench/results.json >/dev/null 2>&1; then
   echo 'ERROR: target/bench/results.json missing or invalid; not updating baseline' >&2
   exit 1
+fi
+
+baseline_tmp=$(mktemp)
+trap 'rm -f "$baseline_tmp"' EXIT
+
+git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline || true
+if git rev-parse -q --verify origin/benchmark-baseline >/dev/null \
+  && git show origin/benchmark-baseline:baseline.json > "$baseline_tmp" 2>/dev/null \
+  && cmp -s "$baseline_tmp" target/bench/results.json; then
+  echo 'Metrics unchanged; keeping the committed baseline'
+  exit 0
 fi
 
 tree=$(printf '100644 blob %s\tbaseline.json\n' \

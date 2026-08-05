@@ -7,8 +7,14 @@
 set -euo pipefail
 
 mkdir -p target/bench/workdir
-git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline || true
-if ! git rev-parse -q --verify origin/benchmark-baseline >/dev/null; then
+if git ls-remote --exit-code --heads origin benchmark-baseline >/dev/null 2>&1; then
+  git fetch -q origin benchmark-baseline:refs/remotes/origin/benchmark-baseline
+else
+  status=$?
+  if [ "$status" -ne 2 ]; then
+    echo 'ERROR: could not determine benchmark baseline status' >&2
+    exit "$status"
+  fi
   echo 'No benchmark baseline found yet; skipping comparison'
   exit 0
 fi
