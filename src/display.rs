@@ -175,11 +175,7 @@ fn print_extractions(
     }
 }
 
-pub fn print_analysis_results(quiet: bool, extraction_attempted: bool, results: &AnalysisResults) {
-    if quiet {
-        return;
-    }
-
+pub fn print_analysis_results(extraction_attempted: bool, results: &AnalysisResults) {
     // Print signature results
     print_header(&results.file_path.display().to_string());
     print_signatures(&results.file_map);
@@ -203,15 +199,11 @@ struct SignatureInfo {
     description: String,
 }
 
-pub fn print_signature_list(quiet: bool, signatures: &Vec<signatures::Signature>) {
+pub fn print_signature_list(signatures: &Vec<signatures::Signature>) {
     let mut extractor_count: usize = 0;
     let mut signature_count: usize = 0;
     let mut sorted_descriptions: Vec<String> = vec![];
     let mut signature_lookup: HashMap<String, SignatureInfo> = HashMap::new();
-
-    if quiet {
-        return;
-    }
 
     // Print column headers
     print_delimiter();
@@ -300,7 +292,6 @@ pub fn print_signature_list(quiet: bool, signatures: &Vec<signatures::Signature>
 }
 
 pub fn print_stats(
-    quiet: bool,
     run_time: time::Instant,
     file_count: usize,
     signature_count: usize,
@@ -313,10 +304,6 @@ pub fn print_stats(
     let mut file_plural = "";
     let mut units = "milliseconds";
     let mut display_time: f64 = run_time.elapsed().as_millis() as f64;
-
-    if quiet {
-        return;
-    }
 
     // Format the output time in a more human-readable manner
     if display_time >= MS_IN_A_SECOND {
