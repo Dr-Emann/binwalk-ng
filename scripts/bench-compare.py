@@ -143,6 +143,10 @@ def main() -> None:
                 regressed = True
                 row["regressed"] = True
                 warnings.append(f"{name} {label}: missing from new results")
+            elif bv == 0 and nv is not None and nv > 0:
+                regressed = True
+                row["regressed"] = True
+                warnings.append(f"{name} {label}: increased from zero to {nv}")
             elif (
                 bv is not None
                 and nv is not None
