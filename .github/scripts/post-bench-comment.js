@@ -33,13 +33,13 @@ module.exports = async ({ github, context, prNumber }) => {
 		body += `${verdict.warnings.map((w) => `- ${w}`).join("\n")}\n`;
 	}
 
-	const comments = await github.rest.issues.listComments({
+	const comments = await github.paginate(github.rest.issues.listComments, {
 		owner,
 		repo,
 		issue_number: number,
 	});
 
-	const existing = comments.data.find((c) => c.body?.includes(marker));
+	const existing = comments.find((c) => c.body?.includes(marker));
 
 	if (existing) {
 		await github.rest.issues.updateComment({
