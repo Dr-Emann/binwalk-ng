@@ -22,16 +22,25 @@ fi
 git show origin/benchmark-baseline:baseline.json > target/bench/baseline.json
 BASE_SHA=$(git rev-parse --short origin/benchmark-baseline)
 
-echo '## Benchmark results' >> "$GITHUB_STEP_SUMMARY"
-if ! python3 scripts/bench-compare.py \
+# bench-compare.py always writes compare.json before exiting; its exit code
+# only distinguishes "regression reported" from "failed to run". Capture the
+# table regardless and gate on compare.json, so a regression can't hide a
+# genuine failure and vice versa.
+python3 scripts/bench-compare.py \
   --results target/bench/results.json \
   --baseline target/bench/baseline.json \
   --sha "$HEAD_SHA" \
   --base-sha "$BASE_SHA" \
   --compare-json "$COMPARE_JSON" \
-  | tee -a "$GITHUB_STEP_SUMMARY"; then
-  if ! jq -e . "$COMPARE_JSON" >/dev/null 2>&1; then
-    echo 'ERROR: comparison failed without writing compare.json' >&2
-    exit 1
-  fi
+  > target/bench/workdir/report.md || true
+
+if ! jq -e . "$COMPARE_JSON" >/dev/null 2>&1; then
+  echo 'ERROR: comparison failed without writing compare.json' >&2
+  exit 1
 fi
+# Regressions are decided by fail-on-regressions.sh; this step only surfaces
+# the table in the job summary.
+{
+  echo '## Benchmark results'
+  cat target/bench/workdir/report.md
+} >> "$GITHUB_STEP_SUMMARY"

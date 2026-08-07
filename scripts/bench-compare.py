@@ -99,8 +99,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
     ap.add_argument("--baseline", required=True)
-    ap.add_argument("--threshold", type=float, default=None,
-                    help="override all metric thresholds with one %% value")
+    ap.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="override all metric thresholds with one %% value",
+    )
     ap.add_argument("--compare-json", default=None)
     ap.add_argument("--sha", default="")
     ap.add_argument("--base-sha", default="")
@@ -114,8 +118,10 @@ def main() -> None:
     rs = by_id(res)
     bs = by_id(base)
 
-    thresholds = {name: args.threshold if args.threshold is not None else t
-                  for _, _, name, t in METRICS}
+    thresholds = {
+        name: args.threshold if args.threshold is not None else t
+        for _, _, name, t in METRICS
+    }
 
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
@@ -133,8 +139,16 @@ def main() -> None:
             bv = metric_value(b, tool, key) if b else None
             nv = metric_value(r, tool, key)
             d = delta(bv, nv)
-            if bv is not None and nv is not None and d is not None \
-                    and d > thresholds[label]:
+            if bv is not None and nv is None:
+                regressed = True
+                row["regressed"] = True
+                warnings.append(f"{name} {label}: missing from new results")
+            elif (
+                bv is not None
+                and nv is not None
+                and d is not None
+                and d > thresholds[label]
+            ):
                 regressed = True
                 row["regressed"] = True
                 warnings.append(f"{name} {label}: +{d}%")
@@ -142,8 +156,10 @@ def main() -> None:
         rows.append(row)
 
     md = [
-        "| scenario | instructions (base → new) | Δ | total bytes allocated | Δ | "
-        "heap allocations | Δ | peak live heap | Δ | verdict |",
+        (
+            "| scenario | instructions (base → new) | Δ | total bytes allocated | Δ | "
+            "heap allocations | Δ | peak live heap | Δ | verdict |"
+        ),
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     fmt = {
@@ -158,8 +174,9 @@ def main() -> None:
         for label, formatter in fmt.items():
             c = cells.get(label, {})
             b, n, d = c.get("base"), c.get("new"), c.get("delta_pct")
-            pair = "—" if b is None and n is None else (
-                f"{formatter(b)} → {formatter(n)}")
+            pair = (
+                "—" if b is None and n is None else (f"{formatter(b)} → {formatter(n)}")
+            )
             line.append(f"| {pair} | {pct(d)} ")
         line.append(f"| {'❌' if row['regressed'] else '✅'} |")
         md.append("".join(line))

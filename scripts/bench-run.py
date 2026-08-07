@@ -16,8 +16,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 
 def runner_version() -> str:
@@ -40,7 +41,11 @@ def ensure_runner(version: str) -> None:
     if exe:
         try:
             out = subprocess.run(
-                [exe, "--version"], capture_output=True, text=True, timeout=10
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
             )
             if re.search(re.escape(version), out.stdout + out.stderr):
                 return
@@ -63,6 +68,7 @@ def main() -> None:
         ["cargo", "bench", "--bench", "gungraun", "--", "--output-format=json"],
         capture_output=True,
         text=True,
+        check=False,
     )
     (bench_dir / "bench.log").write_text(proc.stderr)
     if proc.returncode != 0:
@@ -91,7 +97,7 @@ def main() -> None:
             }
         )
 
-    (bench_dir / "results.json").write_text(json.dumps(results))
+    (bench_dir / "results.json").write_text(json.dumps(results, sort_keys=True))
     print(f"Wrote {bench_dir / 'results.json'} ({len(results)} benchmarks)")
 
 

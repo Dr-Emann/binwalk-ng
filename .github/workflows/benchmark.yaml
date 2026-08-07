@@ -94,6 +94,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/bench-report.sh
       - name: Comment results on PR
+        # Fork PRs can't be commented on from a `pull_request` run: GITHUB_TOKEN is
+        # read-only there, so the API call would 403 and fail the job.
         if: github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/bench/workdir/compare.json') != ''
         uses: actions/github-script@v9
         with:
@@ -101,5 +103,5 @@ jobs:
             const postComment = require('./.github/scripts/post-bench-comment.js');
             await postComment({ github, context });
       - name: Fail on regressions
-        if: github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/bench/workdir/compare.json') != ''
+        if: hashFiles('target/bench/workdir/compare.json') != ''
         run: bash .github/scripts/fail-on-regressions.sh

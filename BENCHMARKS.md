@@ -101,8 +101,9 @@ benchmark against the previous run's output and reports per-metric deltas.
   - instructions / total bytes / heap allocations: **+5%**
   - peak live heap: **+10%** (measured under `--threads 4`, where valgrind's
     serialized scheduling can move the peak; treat it as indicative)
-  Fork PRs get the comparison in the job summary but no comment (the bot token
-  is read-only there).
+  Fork PRs get the comparison in the job summary and **still fail** on
+  regressions, but no comment is posted (the bot token is read-only on
+  `pull_request` runs from forks, so it cannot write one).
 - On pushes to `main` (not PRs or manual runs): the results are pushed to the
   dedicated `benchmark-baseline` branch (root file `baseline.json`), but only
   when the metrics actually changed (the JSON is compared byte-for-byte). The
@@ -124,7 +125,9 @@ benchmark against the previous run's output and reports per-metric deltas.
   if it proves flaky, either run `--threads 1` or relax its threshold in
   `scripts/bench-compare.py`.
 - Thresholds are only applied when both baseline and result values exist for a
-  metric; a benchmark missing from either side is reported as a regression.
+  metric. A benchmark (or metric) present in the baseline but missing from the
+  new results is reported as a regression; a benchmark added in the new run
+  that the baseline doesn't know about is shown in the table but not flagged.
 - First run on a branch: if no `benchmark-baseline` exists yet, the PR
   comparison is skipped and the baseline is established on the next `main`
   push.
