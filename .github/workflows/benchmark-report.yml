@@ -49,23 +49,25 @@ jobs:
           script: |
             const postComment = require('./.github/scripts/post-bench-comment.js');
             const { owner, repo } = context.repo;
+            const headOwner = context.payload.workflow_run.head_repository.owner.login;
+            const headBranch = context.payload.workflow_run.head_branch;
 
-            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            const prs = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
-              commit_sha: context.payload.workflow_run.head_sha,
+              state: 'open',
+              head: `${headOwner}:${headBranch}`,
             });
 
-            const pr = prs.find((p) => p.state === 'open');
-            if (!pr) {
-              console.log('No open PR found for this commit, skipping comment.');
+            if (prs.length !== 1) {
+              console.log(`Expected exactly one open PR for ${headOwner}:${headBranch}, found ${prs.length}. Skipping comment.`);
               return;
             }
 
             await postComment({
               github,
               context,
-              prNumber: pr.number,
+              prNumber: prs[0].number,
             });
 
       - name: Fail on regressions
