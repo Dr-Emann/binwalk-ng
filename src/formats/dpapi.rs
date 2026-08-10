@@ -1,6 +1,7 @@
 use crate::signatures::CONFIDENCE_MEDIUM;
 use crate::signatures::{SignatureError, SignatureResult};
 use crate::structures::StructureError;
+use std::mem::size_of;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LE, Unaligned};
 
 /// Human readable description
@@ -16,25 +17,22 @@ pub fn dpapi_magic() -> Vec<Vec<u8>> {
 
 /// Returns success with additional details
 pub fn dpapi_parser(file_data: &[u8], offset: usize) -> Result<SignatureResult, SignatureError> {
-    // Successful return value
-    let mut result = SignatureResult {
-        offset,
-        description: DESCRIPTION.to_string(),
-        confidence: CONFIDENCE_MEDIUM,
-        ..Default::default()
-    };
-
-    if let Ok(header) = parse_dpapi_blob_header(&file_data[offset..]) {
-        result.description = format!(
+    if let Ok(header) = parse_dpapi_blob_header(file_data.get(offset..).ok_or(SignatureError)?) {
+        return Ok(SignatureResult {
+            offset,
+            description: format!(
             "{}, header_size: {}, blob_size: {}, version: {}, provider_id: {}, master_key_version: {},
-             master_key_id: {}, flags: {}, description_len: {}, crypto_algorithm: {}, crypti_alg_len: {},
+             master_key_id: {}, flags: {}, description_len: {}, crypto_algorithm: {}, crypto_alg_len: {},
              salt_len: {}, hmac_key_len: {}, hash_algorithm: {}, hash_alg_len: {}, hmac2_key_len: {},
              data_len: {}, sign_len: {}",
-             result.description, header.header_size, header.blob_size, header.version, header.provider_id,
+             DESCRIPTION, header.header_size, header.blob_size, header.version, header.provider_id,
              header.master_key_version, header.master_key_id, header.flags, header.description_len,
              header.crypto_algorithm, header.crypto_alg_len, header.salt_len, header.hmac_key_len,
              header.hash_algorithm, header.hash_alg_len, header.hmac2_key_len, header.data_len, header.sign_len
-            );
+            ),
+            confidence: CONFIDENCE_MEDIUM,
+            ..Default::default()
+        });
     }
 
     Err(SignatureError)
@@ -142,7 +140,7 @@ struct DPAPIHeaderP6 {
 
 /// Parse a DPAPI BLOB
 pub fn parse_dpapi_blob_header(dpapi_blob_data: &[u8]) -> Result<DPAPIBlobHeader, StructureError> {
-    let mut offset: usize = (32 + 128 + 32 + 128 + 32 + 32) / 8;
+    let mut offset: usize = size_of::<DPAPIHeaderP1>();
 
     let (dpapi_header, _) =
         DPAPIHeaderP1::ref_from_prefix(dpapi_blob_data).map_err(|_| StructureError)?;
@@ -152,48 +150,64 @@ pub fn parse_dpapi_blob_header(dpapi_blob_data: &[u8]) -> Result<DPAPIBlobHeader
         return Err(StructureError);
     }
 
-    let utf16_vec =
-        utf8_to_utf16(&dpapi_blob_data[offset..=offset + description_len]).ok_or(StructureError)?;
+    let utf16_vec = utf8_to_utf16(
+        dpapi_blob_data
+            .get(offset..offset + description_len)
+            .ok_or(StructureError)?,
+    );
     let desc = String::from_utf16(&utf16_vec).map_err(|_| StructureError)?;
 
-    // NULL character becomes size 1 from size 2
-    if description_len != desc.len() - 1 {
+    // description_len counts bytes (incl. the null terminator); desc counts code units.
+    // Check the description is null-terminated and has no embedded nulls.
+    if !desc.ends_with('\0') || desc.trim_end_matches('\0').contains('\0') {
         return Err(StructureError);
     }
 
     offset += description_len;
 
     let (dpapi_header_p2, _) =
-        DPAPIHeaderP2::ref_from_prefix(&dpapi_blob_data[offset..]).map_err(|_| StructureError)?;
+        DPAPIHeaderP2::ref_from_prefix(dpapi_blob_data.get(offset..).ok_or(StructureError)?)
+            .map_err(|_| StructureError)?;
     let salt_len = dpapi_header_p2.salt_len.get() as usize;
-    offset += (32 + 32 + 32) / 8 + salt_len;
+    offset += size_of::<DPAPIHeaderP2>() + salt_len;
 
     let (dpapi_header_p3, _) =
-        DPAPIHeaderP3::ref_from_prefix(&dpapi_blob_data[offset..]).map_err(|_| StructureError)?;
+        DPAPIHeaderP3::ref_from_prefix(dpapi_blob_data.get(offset..).ok_or(StructureError)?)
+            .map_err(|_| StructureError)?;
 
     let hmac_key_len = dpapi_header_p3.hmac_key_len.get() as usize;
-    offset += 32 / 8 + hmac_key_len;
+    offset += size_of::<DPAPIHeaderP3>() + hmac_key_len;
 
     let (dpapi_header_p4, _) =
-        DPAPIHeaderP4::ref_from_prefix(&dpapi_blob_data[offset..]).map_err(|_| StructureError)?;
+        DPAPIHeaderP4::ref_from_prefix(dpapi_blob_data.get(offset..).ok_or(StructureError)?)
+            .map_err(|_| StructureError)?;
     let hmac2_key_len = dpapi_header_p4.hmac2_key_len.get() as usize;
-    offset += (32 + 32 + 32) / 8 + hmac2_key_len;
+    offset += size_of::<DPAPIHeaderP4>() + hmac2_key_len;
 
     let (dpapi_header_p5, _) =
-        DPAPIHeaderP5::ref_from_prefix(&dpapi_blob_data[offset..]).map_err(|_| StructureError)?;
+        DPAPIHeaderP5::ref_from_prefix(dpapi_blob_data.get(offset..).ok_or(StructureError)?)
+            .map_err(|_| StructureError)?;
 
     let data_len = dpapi_header_p5.data_len.get() as usize;
-    offset += 32 / 8 + data_len;
+    offset += size_of::<DPAPIHeaderP5>() + data_len;
 
     let (dpapi_header_p6, _) =
-        DPAPIHeaderP6::ref_from_prefix(&dpapi_blob_data[offset..]).map_err(|_| StructureError)?;
+        DPAPIHeaderP6::ref_from_prefix(dpapi_blob_data.get(offset..).ok_or(StructureError)?)
+            .map_err(|_| StructureError)?;
 
     let sign_len = dpapi_header_p6.sign_len.get() as usize;
-    offset += 32 / 8 + sign_len;
+    let blob_size = offset + size_of::<DPAPIHeaderP6>() + sign_len;
+
+    let header_size = size_of::<DPAPIHeaderP1>()
+        + size_of::<DPAPIHeaderP2>()
+        + size_of::<DPAPIHeaderP3>()
+        + size_of::<DPAPIHeaderP4>()
+        + size_of::<DPAPIHeaderP5>()
+        + size_of::<DPAPIHeaderP6>();
 
     Ok(DPAPIBlobHeader {
-        header_size: (32 * 13 + 128 * 2) / 8,
-        blob_size: offset,
+        header_size,
+        blob_size,
         version: dpapi_header.version.get(),
         provider_id: dpapi_header.provider_id.get(),
         master_key_version: dpapi_header.master_key_version.get(),
@@ -212,12 +226,11 @@ pub fn parse_dpapi_blob_header(dpapi_blob_data: &[u8]) -> Result<DPAPIBlobHeader
     })
 }
 
-/// Convert &[u8] into &[u16] as vec
-fn utf8_to_utf16(byte_array: &[u8]) -> Option<Vec<u16>> {
-    let mut utf16_vec = Vec::with_capacity(byte_array.len() / 2);
-    for i in 0..utf16_vec.len() {
-        let buff = byte_array[2 * i..=2 * i + 1].try_into().ok()?;
-        utf16_vec[i] = u16::from_be_bytes(buff); // Big endian as to keep bit order
-    }
-    Some(utf16_vec)
+/// Convert &[u8] into Vec<u16>
+/// Any trailing odd byte is silently dropped by chunks_exact(2).
+fn utf8_to_utf16(byte_array: &[u8]) -> Vec<u16> {
+    byte_array
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect()
 }
